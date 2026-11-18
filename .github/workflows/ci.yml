@@ -66,7 +66,7 @@ jobs:
         run: |
           test -f "release/${{ matrix.update_file }}" || { echo "::error::release/${{ matrix.update_file }} missing"; ls release; exit 1; }
           cat "release/${{ matrix.update_file }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: botark-${{ matrix.os }}
           retention-days: 3
