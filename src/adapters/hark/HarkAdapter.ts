@@ -229,6 +229,7 @@ export class HarkAdapter implements PlatformAdapter {
       const status = await bridge.openLogin({ accountId })
       if (status.signedIn) {
         this.upsert(accountId, { displayName: status.displayName, handle: status.handle })
+        await this.refreshMainConversation(accountId)
         this.setStatus(accountId, 'online')
         return 'online'
       }

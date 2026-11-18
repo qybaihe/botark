@@ -2,7 +2,8 @@
  * Interactive Hark login via BrowserWindow + account persist partition.
  *
  * Opens app.hark.com/login (Continue with Google → auth.hark.com → Google).
- * Success: GET /api/auth/get-session is non-null, or a session cookie appears.
+ * Success: GET /api/auth/get-session returns a valid session. Cookies only
+ * trigger a probe: they can appear before OAuth finishes or outlive a session.
  * Never prints cookie/token values.
  */
 
@@ -11,12 +12,12 @@ import { applyProxyToPartition } from '../muse/accountProxy'
 import { partitionForAccount } from '../webContentsViewManager'
 import {
   extractHandle,
-  getAuthSession,
   HARK_LOGIN_URL,
   listSessionCookieNames,
   looksLikeSessionCookie,
   type HarkAuthSession
 } from './harkClient'
+import { probeHarkSession } from './harkSession'
 
 const ALLOWED_HOST =
   /^(?:[\w-]+\.)*(?:hark\.com|google\.com|googleusercontent\.com|gstatic\.com|googleapis\.com|youtube\.com|chromiumapp\.org|apple\.com|icloud\.com|cloudflare\.com)$/i
@@ -67,22 +68,9 @@ async function probeSignedIn(accountId: string): Promise<{
   session: HarkAuthSession
   cookieNames: string[]
 } | null> {
-  try {
-    const session = await getAuthSession(accountId)
-    if (session && typeof session === 'object' && (session.user || session.session)) {
-      const cookieNames = await listSessionCookieNames(accountId)
-      return { session, cookieNames }
-    }
-  } catch (error) {
-    // Unauthorized / network while mid-OAuth is expected.
-    if (process.env['BOTHUB_HARK_DEBUG'] === '1') {
-      console.warn('[hark] get-session probe', error instanceof Error ? error.message : error)
-    }
-  }
-  const cookieNames = await listSessionCookieNames(accountId)
-  if (cookieNames.length > 0) {
-    // Cookie present but get-session failed — still treat as signed in; profile later.
-    return { session: {}, cookieNames }
+  const probe = await probeHarkSession(accountId)
+  if (!('signedIn' in probe)) {
+    return { session: probe.session, cookieNames: await listSessionCookieNames(accountId) }
   }
   return null
 }

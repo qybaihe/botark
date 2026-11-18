@@ -138,6 +138,30 @@ function looksLikeVideo(part: ChatMediaPart): boolean {
   return /\.(mp4|m4v|webm|mov|mkv)$/i.test(part.path || part.name || '')
 }
 
+function isHarkMedia(accountId: string, path: string): boolean {
+  return (
+    useBotStore.getState().accounts[accountId]?.platformId === 'hark' ||
+    /^(harkatt|harkfile):\/\//i.test(path) ||
+    /hark\.com|hark\.ai/i.test(path)
+  )
+}
+
+async function downloadHarkMedia(accountId: string, part: ChatMediaPart) {
+  const bridge = getBridge()?.hark
+  if (!bridge?.rpc) throw new Error('Hark download unavailable')
+  const cleanRef = part.path.trim().replace(/^(harkatt|harkfile):\/\//i, '')
+  const result = await bridge.rpc({
+    accountId,
+    op: 'downloadArtifact',
+    url: /^https?:\/\//i.test(cleanRef) ? cleanRef : undefined,
+    fileId: !/^https?:\/\//i.test(cleanRef) ? cleanRef : undefined,
+    name: part.name
+  })
+  if (!result.ok) throw new Error(result.message || `Hark download failed (${result.status})`)
+  if (!result.data || typeof result.data !== 'object') throw new Error('Hark download returned no data')
+  return result.data as { dataBase64: string; mimeType: string; filename?: string }
+}
+
 function WorkspaceImage({
   part,
   accountId
@@ -166,6 +190,12 @@ function WorkspaceImage({
             return
           }
           setSrc(`data:${preview.mimeType};base64,${preview.dataBase64}`)
+          return
+        }
+        if (isHarkMedia(accountId, part.path)) {
+          const downloaded = await downloadHarkMedia(accountId, part)
+          if (cancelled) return
+          setSrc(`data:${downloaded.mimeType || part.mimeType || 'image/png'};base64,${downloaded.dataBase64}`)
           return
         }
         // Grok Bot attachment path fallback (`ResolveGrokBotAttachmentReads` + fetch via main)
@@ -345,17 +375,19 @@ function MediaParts({
   onOpenDoc?: (target: NativeDocumentTarget) => void
 }) {
   const [downloadingKey, setDownloadingKey] = useState<string | null>(null)
+  const [downloadError, setDownloadError] = useState<string | null>(null)
   if (!parts.length) return null
 
   const handleDirectDownload = async (part: ChatMediaPart) => {
     if (!accountId) return
     const key = part.path || part.name || ''
     setDownloadingKey(key)
+    setDownloadError(null)
     try {
       const bridge = getBridge()
       const rawPath = (part.path || '').trim()
       const isHttpUrl = /^https?:\/\//i.test(rawPath)
-      const isHarkFile = /^(harkatt:\/\/|harkfile:\/\/)/i.test(rawPath) || /hark\.com|hark\.ai/i.test(rawPath)
+      const isHarkFile = isHarkMedia(accountId, rawPath)
       const isDotFile =
         !isHarkFile &&
         (isHttpUrl || /^(CalpicoFile_|file_|libfile_|sediment:\/\/|dotfile:\/\/|dotatt:\/\/)/i.test(rawPath))
@@ -365,20 +397,10 @@ function MediaParts({
       let filename = part.name || (!isHttpUrl ? rawPath.split('/').pop() : undefined) || 'attachment'
 
       if (isHarkFile && bridge?.hark?.rpc) {
-        const cleanRef = rawPath.replace(/^(harkatt|harkfile):\/\//i, '')
-        const res = await bridge.hark.rpc({
-          accountId,
-          op: 'downloadArtifact',
-          url: /^https?:\/\//i.test(cleanRef) ? cleanRef : undefined,
-          fileId: !/^https?:\/\//i.test(cleanRef) ? cleanRef : undefined,
-          name: part.name
-        })
-        if (res.ok && res.data && typeof res.data === 'object') {
-          const d = res.data as { dataBase64: string; mimeType: string; filename?: string; name?: string }
-          dataBase64 = d.dataBase64
-          mimeType = d.mimeType || mimeType
-          filename = d.filename || d.name || filename
-        }
+        const downloaded = await downloadHarkMedia(accountId, part)
+        dataBase64 = downloaded.dataBase64
+        mimeType = downloaded.mimeType || mimeType
+        filename = downloaded.filename || filename
       } else if (isDotFile && bridge?.dot?.rpc) {
         const res = await bridge.dot.rpc({
           accountId,
@@ -412,14 +434,19 @@ function MediaParts({
         setTimeout(() => URL.revokeObjectURL(url), 2000)
       } else if (isHttpUrl) {
         window.open(rawPath, '_blank', 'noopener,noreferrer')
+      } else {
+        throw new Error('Download unavailable')
       }
+    } catch (error) {
+      setDownloadError(error instanceof Error ? error.message : String(error))
     } finally {
       setDownloadingKey(null)
     }
   }
 
   return (
-    <ul className="mb-1.5 flex max-w-[78%] flex-col gap-1.5" aria-label={t('Media')}>
+    <>
+      <ul className="mb-1.5 flex max-w-[78%] flex-col gap-1.5" aria-label={t('Media')}>
       {parts.map((part) => {
         const isHttpUrl = isHttp(part.path)
         const subtitle = isHttpUrl
@@ -496,7 +523,9 @@ function MediaParts({
           </li>
         )
       })}
-    </ul>
+      </ul>
+      {downloadError && <p className="mb-1.5 text-[12px] text-status-error-ink">{downloadError}</p>}
+    </>
   )
 }
 

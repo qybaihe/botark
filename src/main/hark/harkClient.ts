@@ -479,13 +479,13 @@ export async function downloadHarkArtifact(
   text?: string
 }> {
   const ses = await preparedSessionForAccount(accountId)
-  let targetUrl = opts.url?.trim() || ''
+  const reference = opts.url?.trim() || opts.fileId?.replace(/^(harkatt|harkfile):\/\//i, '').trim() || ''
+  let targetUrl = reference.startsWith('/') ? new URL(reference, HARK_ORIGIN).toString() : reference
+  if (!/^https?:\/\//i.test(targetUrl)) targetUrl = ''
 
   if (!targetUrl && opts.fileId) {
     const key = opts.fileId.replace(/^(harkatt|harkfile):\/\//i, '').trim()
-    if (/^https?:\/\//i.test(key)) {
-      targetUrl = key
-    } else {
+    if (!/^https?:\/\//i.test(key)) {
       try {
         const presigned = (await harkFetch(ses, '/images/presign', {
           method: 'POST',
@@ -496,9 +496,6 @@ export async function downloadHarkArtifact(
         if (resolved) targetUrl = resolved
       } catch {
         /* fall through */
-      }
-      if (!targetUrl && key.startsWith('/')) {
-        targetUrl = `${HARK_API_BASE}${key}`
       }
     }
   }

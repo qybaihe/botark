@@ -130,6 +130,9 @@ function useDocumentContent(target: NativeDocumentTarget | null) {
           setContent(d.text ?? decodeBase64Utf8(d.dataBase64))
           return
         }
+        if (!harkRes.ok) {
+          throw new Error(harkRes.message || `Hark document load failed (${harkRes.status})`)
+        }
       }
 
       if ((isHttpUrl || isDotFileId) && bridge?.dot?.rpc && target.platformId !== 'hark') {

@@ -25,7 +25,6 @@ import {
   importHarkCredentials,
   isHarkReplyDone,
   listConversations,
-  listSessionCookieNames,
   sendMessage,
   timezoneName,
   uploadHarkAttachment,
@@ -37,6 +36,7 @@ import {
 } from './harkClient'
 import { cancelHarkLogin, onHarkLoginEvent, openHarkLoginWindow } from './harkLogin'
 import { loadAccountProxyUrl } from '../muse/accountProxy'
+import { probeHarkSession } from './harkSession'
 
 function mapHarkTools(msg: HarkChatMessage): MuseToolCallView[] | undefined {
   if (!msg.toolCalls || msg.toolCalls.length === 0) return undefined
@@ -98,20 +98,15 @@ function broadcast(payload: unknown): void {
 
 async function statusFor(accountId: string): Promise<HarkAuthStatus> {
   const hasProxy = Boolean(await loadAccountProxyUrl(accountId).catch(() => true))
-  try {
-    const session = await getAuthSession(accountId)
-    if (session && (session.user || session.session)) {
-      const { handle, displayName } = extractHandle(session)
-      return { accountId, signedIn: true, handle, displayName, hasProxy }
-    }
-  } catch {
-    /* fall through */
+  const probe = await probeHarkSession(accountId)
+  if ('signedIn' in probe) return { accountId, signedIn: false, hasProxy }
+  return {
+    accountId,
+    signedIn: true,
+    handle: probe.handle,
+    displayName: probe.displayName,
+    hasProxy
   }
-  const cookies = await listSessionCookieNames(accountId)
-  if (cookies.length > 0) {
-    return { accountId, signedIn: true, hasProxy }
-  }
-  return { accountId, signedIn: false, hasProxy }
 }
 
 async function runHarkRpc(req: HarkRpcRequest): Promise<HarkRpcResponse> {
