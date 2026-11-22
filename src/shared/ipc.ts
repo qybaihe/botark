@@ -1306,6 +1306,7 @@ export type HermesRpcRequest =
       op: 'sendMessage'
       botId?: string
       sessionId?: string
+      sessionKey?: string
       text: string
       model?: string
       attachments?: Array<{ name: string; mimeType: string; dataBase64: string }>

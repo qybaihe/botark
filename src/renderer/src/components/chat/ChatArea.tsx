@@ -90,6 +90,7 @@ function ConversationIntro({
 
 export function ChatArea() {
   const bot = useBotStore((s) => s.bots.find((b) => b.id === s.selectedBotId))
+  const sessionError = useBotStore((s) => s.selectedBotId ? s.hermesSessionErrors[s.selectedBotId] : undefined)
   const accountMap = useBotStore((s) => s.accounts)
   const messages = useBotStore((s) => (s.selectedBotId ? s.messages[s.selectedBotId] : undefined) ?? NO_MESSAGES)
   const typing = useBotStore((s) => (s.selectedBotId ? s.typing[s.selectedBotId] === true : false))
@@ -186,6 +187,11 @@ export function ChatArea() {
     <div className="flex min-h-0 flex-1 overflow-hidden">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <ChatHeader bot={bot} accounts={accounts} />
+        {sessionError && (
+          <p role="alert" className="mx-6 my-2 text-[13px] text-status-error">
+            {t('Could not start a new conversation. {reason}', { reason: sessionError })}
+          </p>
+        )}
         {showWebSession && activeAccount ? (
           <WebSessionPane key={`${bot.id}:${activeAccount.id}`} bot={bot} account={activeAccount} />
         ) : (

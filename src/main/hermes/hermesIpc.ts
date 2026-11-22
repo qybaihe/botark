@@ -154,6 +154,7 @@ async function runHermesRpc(req: HermesRpcRequest): Promise<HermesRpcResponse> {
           accountId: req.accountId,
           botId: req.botId,
           sessionId: req.sessionId,
+          sessionKey: req.sessionKey,
           text: req.text,
           model: req.model,
           attachments: req.attachments,

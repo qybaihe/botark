@@ -46,7 +46,6 @@ export class HermesAdapter implements PlatformAdapter {
   private readonly accounts = new Map<string, PlatformAccount>()
   private readonly statuses = new Map<string, ConnectionStatus>()
   private readonly listeners = new Set<AdapterListener>()
-  private readonly activeSessionId = new Map<string, string>()
   private bridgeUnsub: Unsubscribe | null = null
 
   constructor() {
@@ -97,9 +96,6 @@ export class HermesAdapter implements PlatformAdapter {
 
     if (event.type === 'stream') {
       const convId = event.conversationId ?? event.accountId
-      if (event.sessionId) {
-        this.activeSessionId.set(event.accountId, event.sessionId)
-      }
       const tools = event.tools as MuseToolCall[] | undefined
       const media = event.media as MuseMediaPart[] | undefined
       if (!event.done) {
@@ -244,7 +240,7 @@ export class HermesAdapter implements PlatformAdapter {
       isTyping: true
     })
 
-    const sessionId = message.sessionId || this.activeSessionId.get(message.accountId)
+    const sessionId = message.sessionId
     let accepted = false
     try {
       accepted = true
@@ -255,6 +251,7 @@ export class HermesAdapter implements PlatformAdapter {
         op: 'sendMessage',
         botId: message.conversationId,
         sessionId,
+        sessionKey: message.hermesSessionKey,
         text: message.text,
         attachments: message.attachments
           ?.filter((a) => Boolean(a.dataBase64))
@@ -269,10 +266,6 @@ export class HermesAdapter implements PlatformAdapter {
         text?: string
         tools?: MuseToolCall[]
         media?: MuseMediaPart[]
-      }
-
-      if (res?.sessionId) {
-        this.activeSessionId.set(message.accountId, res.sessionId)
       }
 
       this.emit({

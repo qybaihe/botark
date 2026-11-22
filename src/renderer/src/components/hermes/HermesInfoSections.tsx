@@ -201,7 +201,7 @@ export function HermesSessionsSection({
           <Button
             size="sm"
             variant="ghost"
-            onClick={() => void startNewHermesSession(botId).then(() => refresh())}
+            onClick={() => void startNewHermesSession(botId).then((created) => { if (created) void refresh() })}
           >
             <MessageSquarePlus className="size-3.5" aria-hidden />
           </Button>

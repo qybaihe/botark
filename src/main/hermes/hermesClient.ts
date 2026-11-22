@@ -1336,6 +1336,7 @@ export async function sendHermesMessage(args: {
   accountId: string
   botId?: string
   sessionId?: string
+  sessionKey?: string
   text: string
   model?: string
   attachments?: HermesAttachmentInput[]
@@ -1356,7 +1357,7 @@ export async function sendHermesMessage(args: {
   activeRuns.set(args.accountId, { controller, sessionId: args.sessionId })
   pendingApprovals.delete(args.accountId)
 
-  const sessionKey = `botark:${args.botId || args.accountId}`
+  const sessionKey = `botark:${args.sessionKey || args.botId || args.accountId}`
   const model = args.model?.trim() || acc.model
 
   try {

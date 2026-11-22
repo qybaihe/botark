@@ -5,6 +5,7 @@ import { adapterRegistry } from '@adapters/registry'
 import { AdapterError, type AttachmentMeta, type ConnectionStatus, type IncomingMessage, type PlatformId } from '@adapters/types'
 import { createId } from '@shared/id'
 import { createSeed } from '@/data/seed'
+import { t } from '@/lib/i18n'
 import type { AccountDraft, Bot, BotAccount, BotGroup, ChatMessage, ChatReplyTarget, NewBotInput } from '@/types'
 import { clearNoReplyFlag, createSafeStorage, sanitizePersisted, SEND_HARD_TIMEOUT_MS, SendTimeoutError, toPersistedMessages, withTimeout, deliveryAfterError, createInFlightSet, hasLostAttachments, ATTACHMENTS_LOST_TEXT } from './delivery'
 
@@ -74,6 +75,7 @@ export interface BotHubState {
   activeDocument: import('@/components/chat/NativeDocumentDialog').NativeDocumentTarget | null
   /** Per-bot pending quote-reply target shown in Composer. */
   replyingTo: Record<string, ChatReplyTarget | undefined>
+  hermesSessionErrors: Record<string, string | undefined>
   /** Per-account Grok agentIds explicitly removed from sidebar so auto-sync respects user deletion until manual sync. */
   dismissedGrokAgents: Record<string, string[]>
 
@@ -141,7 +143,7 @@ export interface BotHubState {
   switchMuseSession: (botId: string, sessionId: string) => Promise<void>
   startNewMuseSession: (botId: string) => Promise<void>
   switchHermesSession: (botId: string, sessionId: string) => Promise<void>
-  startNewHermesSession: (botId: string) => Promise<void>
+  startNewHermesSession: (botId: string) => Promise<boolean>
   switchAntigravitySession: (botId: string, sessionId: string) => Promise<void>
   startNewAntigravitySession: (botId: string) => void
 
@@ -403,11 +405,16 @@ export const useBotStore = create<BotHubState>()(
     }
     return current
   }
-  const setFreshSession = (botId: string, activeSessionId: string | undefined) =>
+  const setFreshSession = (botId: string, activeSessionId: string | undefined, hermesSessionKey?: string) =>
     set((state) => ({
-      bots: state.bots.map((bot) => (bot.id === botId ? { ...bot, activeSessionId } : bot)),
+      bots: state.bots.map((bot) => bot.id === botId
+        ? { ...bot, activeSessionId, ...(hermesSessionKey ? { hermesSessionKey } : {}) }
+        : bot),
       messages: { ...state.messages, [botId]: [] }
     }))
+
+  const setHermesSessionError = (botId: string, error?: string) =>
+    set((state) => ({ hermesSessionErrors: { ...state.hermesSessionErrors, [botId]: error } }))
 
   const patchAccount = (accountId: string, patch: Partial<BotAccount>) =>
     set((state) => {
@@ -473,6 +480,7 @@ export const useBotStore = create<BotHubState>()(
           conversationId: botId,
           accountId: message.accountId,
           sessionId: bot.activeSessionId,
+          ...(bot.hermesSessionKey ? { hermesSessionKey: bot.hermesSessionKey } : {}),
           text: message.text,
           attachments: message.attachments,
           replyToId: message.replyToId,
@@ -519,6 +527,7 @@ export const useBotStore = create<BotHubState>()(
     settingsTab: 'overview',
     activeDocument: null,
     replyingTo: {},
+    hermesSessionErrors: {},
     dismissedGrokAgents: {},
 
     setActiveDocument: (doc) => set({ activeDocument: doc }),
@@ -796,6 +805,7 @@ export const useBotStore = create<BotHubState>()(
       set((s) => {
         const { [botId]: _messages, ...messages } = s.messages
         const { [botId]: _typing, ...typing } = s.typing
+        const { [botId]: _sessionError, ...hermesSessionErrors } = s.hermesSessionErrors
         let dismissedGrokAgents = s.dismissedGrokAgents
         if (
           bot.platformId === 'grok' &&
@@ -815,6 +825,7 @@ export const useBotStore = create<BotHubState>()(
           bots: s.bots.filter((b) => b.id !== botId),
           messages,
           typing,
+          hermesSessionErrors,
           dismissedGrokAgents,
           selectedBotId: s.selectedBotId === botId ? (neighbour?.id ?? null) : s.selectedBotId
         }
@@ -1252,6 +1263,7 @@ export const useBotStore = create<BotHubState>()(
       const bot = get().bots.find((b) => b.id === botId)
       if (!bot || bot.platformId !== 'hermes') return
       const selection = markSessionSelection(botId)
+      setHermesSessionError(botId)
       patchBot(botId, () => ({ activeSessionId: sessionId }))
       const bridge = electronBridge()
       if (!bridge?.hermes?.rpc) return
@@ -1288,26 +1300,32 @@ export const useBotStore = create<BotHubState>()(
 
     startNewHermesSession: async (botId) => {
       const bot = get().bots.find((b) => b.id === botId)
-      if (!bot || bot.platformId !== 'hermes') return
+      if (!bot || bot.platformId !== 'hermes') return false
       const selection = markSessionSelection(botId)
+      setHermesSessionError(botId)
       const bridge = electronBridge()
-      let newSessionId: string | undefined
-      if (bridge?.hermes?.rpc) {
-        try {
-          const res = await bridge.hermes.rpc({
-            accountId: bot.activeAccountId,
-            op: 'createSession',
-            title: bot.name
-          })
-          if (res.ok && res.data && typeof res.data === 'object') {
-            const id = (res.data as { id?: string }).id
-            if (typeof id === 'string' && id) newSessionId = id
-          }
-        } catch {
-          /* ignore — adapter creates session lazily on first message if unsupported */
+      try {
+        if (!bridge?.hermes?.rpc) throw new Error(t('Hermes connection unavailable'))
+        const res = await bridge.hermes.rpc({
+          accountId: bot.activeAccountId,
+          op: 'createSession',
+          title: bot.name
+        })
+        if (!getBotForSessionSelection(bot, selection)) return false
+        if (!res.ok) {
+          if (![404, 405, 501].includes(res.status)) throw new Error(res.message)
+          // Legacy gateways identify a conversation by X-Hermes-Session-Key.
+          setFreshSession(botId, undefined, createId('hermes'))
+          return true
         }
+        const id = (res.data as { id?: unknown } | null)?.id
+        if (typeof id !== 'string' || !id.trim()) throw new Error(t('Hermes returned no session ID'))
+        setFreshSession(botId, id, createId('hermes'))
+        return true
+      } catch (error) {
+        if (getBotForSessionSelection(bot, selection)) setHermesSessionError(botId, errorMessage(error))
+        return false
       }
-      if (getBotForSessionSelection(bot, selection)) setFreshSession(botId, newSessionId)
     },
 
     switchAntigravitySession: async (botId, sessionId) => {
@@ -2220,6 +2238,7 @@ export const useBotStore = create<BotHubState>()(
         messages: fresh.messages,
         typing: {},
         activity: {},
+        hermesSessionErrors: {},
         selectedBotId: null,
         collapsedGroups: {}
       })

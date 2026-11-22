@@ -165,4 +165,49 @@ describe('session navigation', () => {
     expect(store().bots[0]?.activeSessionId).toBe('assigned-by-platform')
     expect(store().messages[bot.id]?.[0]?.delivery).toBe('sent')
   })
+
+  it.each([
+    { ok: false, status: 503, message: 'Gateway temporarily unavailable' },
+    { ok: true, data: {} }
+  ])('keeps the Hermes session and history when creation fails with %j', async (response) => {
+    vi.stubGlobal('window', { electron: { hermes: { rpc: async () => response } } })
+    const previous = { ...row('existing-message'), role: 'user' as const, botId: bot.id, accountId: bot.activeAccountId }
+    useBotStore.setState({ messages: { [bot.id]: [previous] } })
+
+    expect(await store().startNewHermesSession(bot.id)).toBe(false)
+    expect(store().bots[0]?.activeSessionId).toBe('initial')
+    expect(store().messages[bot.id]).toEqual([previous])
+    expect(store().hermesSessionErrors[bot.id]).toBeTruthy()
+  })
+
+  it('gives each new legacy Hermes chat its own key without reusing a cached native session', async () => {
+    const rpc = vi.fn()
+      .mockResolvedValueOnce({ ok: true, data: { sessionId: 'old-native-session', text: 'old reply' } })
+      .mockResolvedValueOnce({ ok: false, status: 404, message: 'Not supported' })
+      .mockResolvedValueOnce({ ok: true, data: { text: 'new reply' } })
+      .mockResolvedValueOnce({ ok: false, status: 405, message: 'Not supported' })
+      .mockResolvedValueOnce({ ok: true, data: { text: 'another reply' } })
+    vi.stubGlobal('window', { electron: { hermes: { rpc, onEvent: () => () => undefined } } })
+    vi.spyOn(adapterRegistry, 'get').mockReturnValue(new HermesAdapter())
+
+    await store().sendMessage(bot.id, 'Old conversation')
+    expect(store().bots[0]?.activeSessionId).toBe('old-native-session')
+    expect(await store().startNewHermesSession(bot.id)).toBe(true)
+    const firstKey = store().bots[0]?.hermesSessionKey
+    expect(firstKey).toBeTruthy()
+    expect(store().messages[bot.id]).toEqual([])
+    await store().sendMessage(bot.id, 'First legacy chat')
+    expect(rpc).toHaveBeenNthCalledWith(3, expect.objectContaining({
+      sessionId: undefined, sessionKey: firstKey
+    }))
+
+    expect(await store().startNewHermesSession(bot.id)).toBe(true)
+    const secondKey = store().bots[0]?.hermesSessionKey
+    expect(secondKey).toBeTruthy()
+    expect(secondKey).not.toBe(firstKey)
+    await store().sendMessage(bot.id, 'Second legacy chat')
+    expect(rpc).toHaveBeenNthCalledWith(5, expect.objectContaining({
+      sessionId: undefined, sessionKey: secondKey
+    }))
+  })
 })

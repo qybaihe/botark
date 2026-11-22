@@ -50,6 +50,7 @@ export interface Bot {
   activeAccountId: string
   /** Active Muse thread / session id (`session_id`). */
   activeSessionId?: string
+  hermesSessionKey?: string
   /** Grok Bot agent UUID to talk to (optional; defaults to first agent). */
   selectedAgentId?: string
   memory: MemoryItem[]

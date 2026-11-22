@@ -55,6 +55,8 @@ export interface OutgoingMessage {
   accountId: string
   /** Optional platform thread / session id (e.g. Muse session_id). */
   sessionId?: string
+  /** A new Hermes conversation needs its own key on gateways without native sessions. */
+  hermesSessionKey?: string
   /** Optional message id being replied to (e.g. Grok reply_to_id). */
   replyToId?: string
   /** Optional quoted snippet when replying. */
