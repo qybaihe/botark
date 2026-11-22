@@ -46,9 +46,9 @@ export class HermesAdapter implements PlatformAdapter {
   private readonly accounts = new Map<string, PlatformAccount>()
   private readonly statuses = new Map<string, ConnectionStatus>()
   private readonly listeners = new Set<AdapterListener>()
-  private readonly pendingAcceptances = new Map<string, () => void>()
   private readonly activeSessionId = new Map<string, string>()
   private bridgeUnsub: Unsubscribe | null = null
+  private readonly pendingAcceptances = new Map<string, () => void>()
 
   constructor() {
     this.bindBridgeEvents()
@@ -281,7 +281,6 @@ export class HermesAdapter implements PlatformAdapter {
         media?: MuseMediaPart[]
       }
 
-      markAccepted()
       if (res?.sessionId) {
         this.activeSessionId.set(message.accountId, res.sessionId)
       }
@@ -294,6 +293,7 @@ export class HermesAdapter implements PlatformAdapter {
       })
       this.setStatus(message.accountId, 'online')
 
+      markAccepted()
       const hasPayload = Boolean(res?.text?.trim() || res?.tools?.length || res?.media?.length)
       return {
         messageId: createId('msg'),
