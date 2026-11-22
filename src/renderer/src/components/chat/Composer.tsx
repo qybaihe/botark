@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent } from 'react'
 import type { AttachmentMeta } from '@adapters/types'
-import { createId } from '@shared/id'
 import { ArrowUp, CornerDownRight, FileText, Film, Loader2, LogIn, Music, Plus, PlugZap, Square, X } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { IconButton } from '@/components/ui/IconButton'
@@ -9,6 +8,7 @@ import { formatBytes } from '@/lib/format'
 import { useBotStore } from '@/store/botStore'
 import type { Bot, BotAccount } from '@/types'
 import { t } from '@/lib/i18n'
+import { createAttachmentDraft, type DraftAttachment } from './attachmentDraft'
 
 interface ComposerProps {
   bot: Bot
@@ -27,58 +27,6 @@ interface ComposerProps {
 }
 
 const MAX_HEIGHT_PX = 200
-
-const MAX_IMAGE_ATTACHMENT_BYTES = 20 * 1024 * 1024
-/** Non-image / video attachments (Muse file_ref, Hark/Dot/Grok S3/Blob presign upload): allow up to 50 MiB. */
-const MAX_FILE_ATTACHMENT_BYTES = 50 * 1024 * 1024
-
-function inferBrowserFileMime(file: File): string {
-  if (file.type && file.type !== 'application/octet-stream') return file.type
-  const lower = (file.name || '').toLowerCase()
-  if (lower.endsWith('.png')) return 'image/png'
-  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg'
-  if (lower.endsWith('.gif')) return 'image/gif'
-  if (lower.endsWith('.webp')) return 'image/webp'
-  if (lower.endsWith('.svg')) return 'image/svg+xml'
-  if (lower.endsWith('.avif')) return 'image/avif'
-  if (lower.endsWith('.mp4') || lower.endsWith('.m4v')) return 'video/mp4'
-  if (lower.endsWith('.webm')) return 'video/webm'
-  if (lower.endsWith('.mov')) return 'video/quicktime'
-  if (lower.endsWith('.mkv')) return 'video/x-matroska'
-  if (lower.endsWith('.mp3')) return 'audio/mpeg'
-  if (lower.endsWith('.m4a') || lower.endsWith('.aac')) return 'audio/mp4'
-  if (lower.endsWith('.wav')) return 'audio/wav'
-  if (lower.endsWith('.ogg')) return 'audio/ogg'
-  if (lower.endsWith('.pdf')) return 'application/pdf'
-  return file.type || 'application/octet-stream'
-}
-
-async function fileToAttachment(file: File): Promise<AttachmentMeta> {
-  const mimeType = inferBrowserFileMime(file)
-  const base: AttachmentMeta = {
-    id: createId('att'),
-    name: file.name || `attachment.${mimeType.split('/')[1] || 'bin'}`,
-    size: file.size,
-    mimeType
-  }
-  const isImage = mimeType.startsWith('image/')
-  const limit = isImage ? MAX_IMAGE_ATTACHMENT_BYTES : MAX_FILE_ATTACHMENT_BYTES
-  if (file.size > limit) {
-    return base // no dataBase64 → Composer shows oversized notice
-  }
-  const buf = await file.arrayBuffer()
-  const bytes = new Uint8Array(buf)
-  let binary = ''
-  const chunk = 0x8000
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunk))
-  }
-  return { ...base, dataBase64: btoa(binary) }
-}
-
-async function toAttachments(files: FileList | File[]): Promise<AttachmentMeta[]> {
-  return Promise.all(Array.from(files).map((file) => fileToAttachment(file)))
-}
 
 function ConnectionNotice({
   account,
@@ -196,7 +144,8 @@ function ConnectionNotice({
 
 export function Composer({ bot, account, typing = false, onSend, onCancel, onConnect, onMuseLogin, onGrokLogin, onHarkLogin, onDotLogin, onAntigravityLogin, hideNotice = false }: ComposerProps) {
   const [text, setText] = useState('')
-  const [attachments, setAttachments] = useState<AttachmentMeta[]>([])
+  const [attachments, setAttachments] = useState<DraftAttachment[]>([])
+  const [draft] = useState(() => createAttachmentDraft(setAttachments))
   const [dragging, setDragging] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -207,7 +156,7 @@ export function Composer({ bot, account, typing = false, onSend, onCancel, onCon
   const [multiline, setMultiline] = useState(false)
   const expanded = multiline || attachments.length > 0 || Boolean(replyTarget)
   const hasContent = text.trim().length > 0 || attachments.length > 0
-  const canSend = connected && hasContent
+  const canSend = connected && hasContent && attachments.every((entry) => entry.status === 'ready')
 
   // The palette asks for focus after jumping to a bot.
   useEffect(() => {
@@ -225,12 +174,11 @@ export function Composer({ bot, account, typing = false, onSend, onCancel, onCon
   }
 
   const submit = () => {
-    if (!canSend) return
-    const sendable = attachments.filter((a) => a.dataBase64)
-    if (!text.trim() && sendable.length === 0) return
+    const sendable = draft.forSend()
+    if (!connected || !sendable || (!text.trim() && sendable.length === 0)) return
     onSend(text, sendable)
     setText('')
-    setAttachments([])
+    draft.clear()
     requestAnimationFrame(resize)
   }
 
@@ -248,10 +196,7 @@ export function Composer({ bot, account, typing = false, onSend, onCancel, onCon
   }
 
   const addFiles = (files: FileList | File[] | null) => {
-    if (!files || files.length === 0) return
-    void toAttachments(files).then((next) => {
-      setAttachments((current) => [...current, ...next])
-    })
+    if (files) void draft.add(files)
   }
 
   const onDrop = (event: DragEvent) => {
@@ -310,23 +255,27 @@ export function Composer({ bot, account, typing = false, onSend, onCancel, onCon
               </button>
             </div>
           )}
-          {attachments.some((f) => !f.dataBase64) && (
-            <p className="px-1 pb-1 text-[12px] text-status-error">
-              部分文件超出大小限制（图片最大 20 MB，视频/文件最大 50 MB）
-            </p>
-          )}
           {attachments.length > 0 && (
             <ul className="flex flex-wrap gap-1.5 px-1 pt-0.5 pb-1.5" aria-label={t('Attachments')}>
-              {attachments.map((file) => {
-                const isImg = file.mimeType.startsWith('image/') && Boolean(file.dataBase64)
+              {attachments.map(({ file, status }) => {
+                const image = file.mimeType.startsWith('image/')
+                const isImg = image && status === 'ready'
                 const isVideo = file.mimeType.startsWith('video/')
                 const isAudio = file.mimeType.startsWith('audio/')
+                const invalid = status !== 'ready' && status !== 'reading'
+                const detail = {
+                  reading: t('Reading attachment…'),
+                  ready: formatBytes(file.size),
+                  'too-large': t('File exceeds {limit} MB', { limit: image ? 20 : 50 }),
+                  empty: t('Empty file'),
+                  'read-failed': t('Could not read file')
+                }[status]
                 return (
                   <li
                     key={file.id}
                     className={cn(
                       'flex animate-mark-pop items-center gap-2 rounded-xl border border-line/70 bg-hover/80 py-1 pr-1.5 pl-1.5 text-[12px]',
-                      !file.dataBase64 && 'border-status-error/40 bg-status-error/5'
+                      invalid && 'border-status-error/40 bg-status-error/5'
                     )}
                   >
                     {isImg ? (
@@ -337,7 +286,9 @@ export function Composer({ bot, account, typing = false, onSend, onCancel, onCon
                       />
                     ) : (
                       <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-surface text-accent-600">
-                        {isVideo ? (
+                        {status === 'reading' ? (
+                          <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                        ) : isVideo ? (
                           <Film className="size-3.5" aria-hidden />
                         ) : isAudio ? (
                           <Music className="size-3.5" aria-hidden />
@@ -348,12 +299,17 @@ export function Composer({ bot, account, typing = false, onSend, onCancel, onCon
                     )}
                     <div className="min-w-0">
                       <span className="block max-w-40 truncate font-medium text-ink">{file.name}</span>
-                      <span className="block text-[11px] text-ink-muted tabular-nums">{formatBytes(file.size)}</span>
+                      <span
+                        className={cn('block text-[11px] tabular-nums', invalid ? 'text-status-error' : 'text-ink-muted')}
+                        aria-live="polite"
+                      >
+                        {detail}
+                      </span>
                     </div>
                     <button
                       type="button"
-                      aria-label={`Remove ${file.name}`}
-                      onClick={() => setAttachments((current) => current.filter((f) => f.id !== file.id))}
+                      aria-label={t('Remove {name}', { name: file.name })}
+                      onClick={() => draft.remove(file.id)}
                       className="press-icon grid size-5 shrink-0 place-items-center rounded-md text-ink-muted hover:bg-active hover:text-ink"
                     >
                       <X className="size-3" />
