@@ -222,6 +222,11 @@ public struct SyncedMessage: Codable, Identifiable, Equatable, Sendable {
     public var error: String?
     public var tools: [SyncedToolCall]?
     public var media: [SyncedMediaPart]?
+    var isLocalRelayMessage = false
+
+    private enum CodingKeys: String, CodingKey {
+        case id, botId, accountId, role, text, createdAt, delivery, error, tools, media
+    }
 
     public var isUser: Bool { role == "user" }
 
@@ -303,6 +308,25 @@ public struct WorkspaceSnapshot: Codable, Equatable, Sendable {
         messages: [:],
         approvals: [:]
     )
+
+    mutating func carryLocalRelayMessages(from current: WorkspaceSnapshot) {
+        for bot in bots {
+            guard let previous = current.bots.first(where: { $0.id == bot.id }),
+                  previous.activeAccountId == bot.activeAccountId,
+                  previous.activeSessionId == bot.activeSessionId else { continue }
+            let receivedIds = Set(messages[bot.id, default: []].map(\.id))
+            let pending = current.messages[bot.id, default: []].filter {
+                $0.isLocalRelayMessage && !receivedIds.contains($0.id)
+            }
+            if !pending.isEmpty { messages[bot.id, default: []].append(contentsOf: pending) }
+        }
+    }
+
+    var withoutLocalRelayMessages: WorkspaceSnapshot {
+        var result = self
+        result.messages = messages.mapValues { $0.filter { !$0.isLocalRelayMessage } }
+        return result
+    }
 }
 
 public struct DirectHermesCredential: Codable, Identifiable, Equatable, Sendable {

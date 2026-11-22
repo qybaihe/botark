@@ -185,12 +185,16 @@ export function startMobileSyncBridge(): () => void {
 
   const adapterUnsubs = adapterRegistry.list().map((adapter) => adapter.subscribe(handleAdapterEvent))
 
-  // Execute commands sent from paired iOS devices
+  const unsubscribeSend = mobileSync.onSendCommand((cmd) => {
+    const result = useBotStore.getState().queueMobileMessage(cmd)
+    if (result.ok) mobileSync.pushSnapshot(buildWorkspaceSnapshot())
+    return result
+  })
+
+  // Execute the remaining commands sent from paired devices.
   const unsubCommands = mobileSync.onCommand((cmd) => {
     const store = useBotStore.getState()
-    if (cmd.kind === 'sendMessage') {
-      void store.sendMessage(cmd.botId, cmd.text)
-    } else if (cmd.kind === 'stopGeneration') {
+    if (cmd.kind === 'stopGeneration') {
       void store.cancelGeneration(cmd.botId)
     } else if (cmd.kind === 'newSession') {
       const bot = store.bots.find((b) => b.id === cmd.botId)
@@ -238,6 +242,7 @@ export function startMobileSyncBridge(): () => void {
   return () => {
     if (timer) clearTimeout(timer)
     unsubStore()
+    unsubscribeSend()
     unsubCommands()
     unsubState()
     for (const u of adapterUnsubs) u()

@@ -14,7 +14,9 @@ export const MOBILE_SYNC_CHANNELS = {
   pushSnapshot: 'bothub:mobile-sync:push-snapshot',
   pushEvent: 'bothub:mobile-sync:push-event',
   stateChanged: 'bothub:mobile-sync:state-changed',
-  command: 'bothub:mobile-sync:command'
+  command: 'bothub:mobile-sync:command',
+  sendCommand: 'bothub:mobile-sync:send-command',
+  sendCommandResult: 'bothub:mobile-sync:send-command-result'
 } as const
 
 export interface MobileSyncedAccount {
@@ -141,13 +143,17 @@ export type MobileBridgeLiveEvent =
       pending: HermesApprovalView[]
     }
 
+export interface MobileSendCommand {
+  botId: string
+  text: string
+  clientMessageId: string
+}
+
+export type MobileSendResult =
+  | { ok: true; messageId: string }
+  | { ok: false; status: 400 | 404 | 409 | 503; message: string }
+
 export type MobileRelayCommand =
-  | {
-      kind: 'sendMessage'
-      botId: string
-      text: string
-      clientMessageId?: string
-    }
   | {
       kind: 'stopGeneration'
       botId: string

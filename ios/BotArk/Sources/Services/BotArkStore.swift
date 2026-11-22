@@ -322,8 +322,8 @@ public final class BotArkStore {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
-        let clientMsgId = "ios_msg_\(UUID().uuidString.prefix(10).lowercased())"
-        let userMsg = SyncedMessage(
+        let clientMsgId = "ios_msg_\(UUID().uuidString.lowercased())"
+        var userMsg = SyncedMessage(
             id: clientMsgId,
             botId: bot.id,
             accountId: bot.activeAccountId,
@@ -332,21 +332,24 @@ public final class BotArkStore {
             createdAt: Date().timeIntervalSince1970 * 1000,
             delivery: "sending"
         )
-        appendOrUpdateMessage(botId: bot.id, message: userMsg)
-
-        // Path 1: Live Desktop Bridge (supports all 5 platforms!)
         if let desktop = pairedDesktop, connectionState.isBridgeConnected {
-            typingByBotId[bot.id] = true
+            userMsg.isLocalRelayMessage = true
+            appendOrUpdateMessage(botId: bot.id, message: userMsg)
             do {
-                try await bridge.sendMessage(desktop: desktop, botId: bot.id, text: trimmed, clientMessageId: clientMsgId)
-                markMessageDelivery(botId: bot.id, messageId: clientMsgId, delivery: "sent", error: nil)
+                let messageId = try await bridge.sendMessage(desktop: desktop, botId: bot.id, text: trimmed, clientMessageId: clientMsgId)
+                if messageId != clientMsgId {
+                    // Older desktops publish their own ID in the next snapshot.
+                    snapshot.messages[bot.id]?.removeAll { $0.id == clientMsgId && $0.isLocalRelayMessage }
+                }
             } catch {
-                typingByBotId[bot.id] = false
-                markMessageDelivery(botId: bot.id, messageId: clientMsgId, delivery: "failed", error: error.localizedDescription)
-                lastError = error.localizedDescription
+                if let index = snapshot.messages[bot.id]?.firstIndex(where: { $0.id == clientMsgId && $0.isLocalRelayMessage }) {
+                    snapshot.messages[bot.id]?[index].delivery = "failed"
+                    snapshot.messages[bot.id]?[index].error = error.localizedDescription
+                }
             }
             return
         }
+        appendOrUpdateMessage(botId: bot.id, message: userMsg)
 
         // Path 2: Standalone Direct Hermes SSE (computer asleep / away!)
         if let cred = directCredential(for: bot) {
@@ -558,6 +561,7 @@ public final class BotArkStore {
             !incoming.bots.contains(where: { $0.id == bot.id })
         }
         var merged = incoming
+        merged.carryLocalRelayMessages(from: snapshot)
         if !localOnlyBots.isEmpty {
             let fallbackGroupId = merged.groups.first?.id ?? "grp_standalone"
             if merged.groups.isEmpty {
@@ -606,7 +610,7 @@ public final class BotArkStore {
     }
 
     private func saveCacheToDisk() {
-        if let data = try? JSONEncoder().encode(snapshot) {
+        if let data = try? JSONEncoder().encode(snapshot.withoutLocalRelayMessages) {
             try? data.write(to: Self.cacheUrl, options: [.atomic, .completeFileProtection])
         }
     }

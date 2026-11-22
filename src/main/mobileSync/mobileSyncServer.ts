@@ -19,6 +19,8 @@ import {
   type DirectHermesCredential,
   type MobileBridgeLiveEvent,
   type MobileRelayCommand,
+  type MobileSendCommand,
+  type MobileSendResult,
   type MobileSyncStateView,
   type MobileWorkspaceSnapshot,
   type PairedMobileDeviceView
@@ -36,6 +38,8 @@ import {
 const DEFAULT_PORT = 19472
 const PAIR_TTL_MS = 10 * 60 * 1000
 const MAX_BODY_BYTES = 2 * 1024 * 1024
+const SEND_RETRY_TTL_MS = 2 * 60 * 1000
+const MAX_SEND_RECORDS = 512
 
 interface StoredDeviceRecord {
   deviceId: string
@@ -57,6 +61,7 @@ export interface MobileSyncServerOptions {
   appVersion?: string
   getDirectCredentials?: () => DirectHermesCredential[]
   onCommand?: (command: MobileRelayCommand) => void
+  onSendMessage?: (command: MobileSendCommand) => Promise<MobileSendResult>
   onStateChange?: (state: MobileSyncStateView) => void
 }
 
@@ -132,6 +137,11 @@ export class MobileSyncServer {
   private latestSnapshot: MobileWorkspaceSnapshot
   private readonly devices = new Map<string, StoredDeviceRecord>()
   private readonly sockets = new Map<WebSocket, string>() // ws -> deviceId
+  private readonly sends = new Map<string, {
+    fingerprint: string
+    result: Promise<MobileSendResult>
+    expiresAt: number
+  }>()
   private readonly options: MobileSyncServerOptions
   private readonly hostLabel: string
   private readonly appVersion: string
@@ -601,10 +611,21 @@ code{color:#93c5fd}</style></head><body><div class="card">
           sendJson(res, 400, { ok: false, message: 'Message text is required' })
           return
         }
-        const clientMessageId =
-          typeof body['clientMessageId'] === 'string' ? body['clientMessageId'] : undefined
-        this.options.onCommand?.({ kind: 'sendMessage', botId, text, clientMessageId })
-        sendJson(res, 200, { ok: true, acceptedAt: Date.now() })
+        const id = body['clientMessageId']
+        if (id !== undefined && (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(id))) {
+          sendJson(res, 400, { ok: false, message: 'Invalid client message ID' })
+          return
+        }
+        const result = await this.queueSend(device.deviceId, {
+          botId,
+          text,
+          clientMessageId: id ?? `mobile_${randomUUID()}`
+        })
+        if (!result.ok) {
+          sendJson(res, result.status, { ok: false, message: result.message })
+        } else {
+          sendJson(res, 200, { ok: true, messageId: result.messageId, acceptedAt: Date.now() })
+        }
         return
       }
 
@@ -657,6 +678,34 @@ code{color:#93c5fd}</style></head><body><div class="card">
         ok: false,
         message: error instanceof Error ? error.message : String(error)
       })
+    }
+  }
+
+  private async queueSend(deviceId: string, command: MobileSendCommand): Promise<MobileSendResult> {
+    const now = Date.now()
+    for (const [id, entry] of this.sends) {
+      if (entry.expiresAt <= now) this.sends.delete(id)
+    }
+    const key = JSON.stringify([deviceId, command.clientMessageId])
+    const fingerprint = sha256Hex(JSON.stringify([command.botId, command.text]))
+    const previous = this.sends.get(key)
+    if (previous) {
+      return previous.fingerprint === fingerprint
+        ? previous.result
+        : { ok: false, status: 409, message: 'Message ID is already in use' }
+    }
+    if (!this.options.onSendMessage || this.sends.size >= MAX_SEND_RECORDS) {
+      return { ok: false, status: 503, message: 'Desktop is unavailable' }
+    }
+
+    const entry = { fingerprint, result: this.options.onSendMessage(command), expiresAt: Infinity }
+    this.sends.set(key, entry)
+    try {
+      const result = await entry.result
+      if (result.ok) entry.expiresAt = Date.now() + SEND_RETRY_TTL_MS
+      return result
+    } finally {
+      if (entry.expiresAt === Infinity) this.sends.delete(key)
     }
   }
 }

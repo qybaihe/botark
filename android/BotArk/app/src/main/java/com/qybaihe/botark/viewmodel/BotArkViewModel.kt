@@ -367,7 +367,7 @@ class BotArkViewModel(application: Application) : AndroidViewModel(application) 
     fun sendMessage(bot: SyncedBot, text: String) {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
-        val clientMsgId = "and_msg_${UUID.randomUUID().toString().take(10)}"
+        val clientMsgId = "and_msg_${UUID.randomUUID()}"
         val userMsg = SyncedMessage(
             id = clientMsgId,
             botId = bot.id,
@@ -377,23 +377,25 @@ class BotArkViewModel(application: Application) : AndroidViewModel(application) 
             createdAt = System.currentTimeMillis().toDouble(),
             delivery = "sending"
         )
-        appendOrUpdateMessage(bot.id, userMsg)
-
         val state = _uiState.value
         val desktop = state.pairedDesktop
         if (desktop != null && state.connectionState.isBridgeConnected) {
-            setTyping(bot.id, true)
+            appendOrUpdateMessage(bot.id, userMsg.copy(isLocalRelayMessage = true))
             viewModelScope.launch {
                 try {
-                    bridge.sendMessage(desktop, bot.id, trimmed, clientMsgId)
-                    markDelivery(bot.id, clientMsgId, "sent", null)
+                    val messageId = bridge.sendMessage(desktop, bot.id, trimmed, clientMsgId)
+                    if (messageId != clientMsgId) updateLocalRelayMessage(bot.id, clientMsgId) { null }
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
-                    setTyping(bot.id, false)
-                    markDelivery(bot.id, clientMsgId, "failed", e.message)
+                    updateLocalRelayMessage(bot.id, clientMsgId) {
+                        it.copy(delivery = "failed", error = e.message ?: "发送失败")
+                    }
                 }
             }
             return
         }
+        appendOrUpdateMessage(bot.id, userMsg)
 
         val cred = state.directCredential(bot)
         if (cred != null) {
@@ -553,9 +555,8 @@ class BotArkViewModel(application: Application) : AndroidViewModel(application) 
     private fun handleWsEnvelope(env: MobileWsEnvelope) {
         when (env.type) {
             "snapshot" -> env.snapshot?.let { snap ->
-                val mergedSnap = mergeWithLocalStandalone(_uiState.value.snapshot, snap)
-                vault.saveSnapshotCache(mergedSnap)
-                _uiState.update { it.copy(snapshot = mergedSnap) }
+                _uiState.update { it.copy(snapshot = mergeWithLocalStandalone(it.snapshot, snap)) }
+                vault.saveSnapshotCache(_uiState.value.snapshot)
             }
             "message_delta" -> {
                 val botId = env.botId ?: return
@@ -610,8 +611,9 @@ class BotArkViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun mergeWithLocalStandalone(
         current: WorkspaceSnapshot,
-        incoming: WorkspaceSnapshot
+        desktop: WorkspaceSnapshot
     ): WorkspaceSnapshot {
+        val incoming = desktop.carryingLocalRelayMessages(current)
         val incomingIds = incoming.bots.mapTo(hashSetOf()) { it.id }
         val localOnly = current.bots.filter {
             (it.isStandaloneWeb || it.id.startsWith("bot_and_")) && it.id !in incomingIds
@@ -661,6 +663,16 @@ class BotArkViewModel(application: Application) : AndroidViewModel(application) 
             }
             val map = st.snapshot.messages.toMutableMap().apply { put(botId, list) }
             st.copy(snapshot = st.snapshot.copy(messages = map))
+        }
+    }
+
+    private fun updateLocalRelayMessage(botId: String, messageId: String, change: (SyncedMessage) -> SyncedMessage?) {
+        _uiState.update { state ->
+            val list = state.snapshot.messages[botId] ?: return@update state
+            val updated = list.mapNotNull { message ->
+                if (message.id == messageId && message.isLocalRelayMessage) change(message) else message
+            }
+            state.copy(snapshot = state.snapshot.copy(messages = state.snapshot.messages + (botId to updated)))
         }
     }
 

@@ -51,6 +51,9 @@ private data class ApprovalDecisionBody(
     val decision: String
 )
 
+@Serializable
+private data class DesktopCommandResponse(val messageId: String? = null, val message: String? = null)
+
 class DesktopBridgeClient internal constructor(private val client: OkHttpClient) {
     constructor() : this(
         OkHttpClient.Builder()
@@ -170,9 +173,9 @@ class DesktopBridgeClient internal constructor(private val client: OkHttpClient)
         botId: String,
         text: String,
         clientMessageId: String
-    ) {
+    ): String? {
         val body = json.encodeToString(SendMessageBody(text, clientMessageId))
-        postCommand(desktop, "bots", botId, "send", failure = "发送失败", body = body.toRequestBody(jsonMedia))
+        return postCommand(desktop, "bots", botId, "send", failure = "发送失败", body = body.toRequestBody(jsonMedia))?.messageId
     }
 
     suspend fun stopGeneration(desktop: PairedDesktopInfo, botId: String) {
@@ -217,7 +220,11 @@ class DesktopBridgeClient internal constructor(private val client: OkHttpClient)
             .build()
         client.newCall(req).execute().use { resp ->
             if (resp.code == 401) throw DesktopBridgeException("授权已失效", unauthorized = true)
-            if (!resp.isSuccessful) throw DesktopBridgeException("$failure（HTTP ${resp.code}）")
+            val payload = runCatching {
+                json.decodeFromString<DesktopCommandResponse>(resp.body?.string().orEmpty())
+            }.getOrNull()
+            if (!resp.isSuccessful) throw DesktopBridgeException(payload?.message ?: "$failure（HTTP ${resp.code}）")
+            payload
         }
     }
 

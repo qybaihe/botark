@@ -1,10 +1,13 @@
 import { writeFileSync } from 'node:fs'
-import { app, BrowserWindow, dialog, ipcMain } from 'electron'
+import { randomUUID } from 'node:crypto'
+import { app, BrowserWindow, dialog, ipcMain, type WebContents } from 'electron'
 import {
   MOBILE_SYNC_CHANNELS,
   type DirectHermesCredential,
   type MobileBridgeLiveEvent,
   type MobileRelayCommand,
+  type MobileSendCommand,
+  type MobileSendResult,
   type MobileSyncStateView,
   type MobileWorkspaceSnapshot
 } from '@shared/mobileSync'
@@ -13,6 +16,7 @@ import { defaultMobileSyncDevicesPath, MobileSyncServer } from './mobileSyncServ
 
 let syncServer: MobileSyncServer | null = null
 let registered = false
+const pendingSends = new Map<string, { contents: WebContents; finish: (result: MobileSendResult) => void }>()
 
 function broadcastState(state: MobileSyncStateView): void {
   for (const win of BrowserWindow.getAllWindows()) {
@@ -25,6 +29,31 @@ function dispatchCommandToRenderer(command: MobileRelayCommand): void {
   const win = BrowserWindow.getAllWindows().find((w) => !w.isDestroyed() && !w.webContents.isDestroyed())
   if (!win) return
   win.webContents.send(MOBILE_SYNC_CHANNELS.command, command)
+}
+
+function dispatchSendToRenderer(command: MobileSendCommand): Promise<MobileSendResult> {
+  const win = BrowserWindow.getAllWindows().find((w) => !w.isDestroyed() && !w.webContents.isDestroyed())
+  const unavailable = { ok: false, status: 503, message: 'Desktop did not confirm that it queued the message' } as const
+  if (!win) return Promise.resolve(unavailable)
+  const contents = win.webContents
+  const id = randomUUID()
+  return new Promise((resolve) => {
+    const onDestroyed = () => finish(unavailable)
+    const timer = setTimeout(onDestroyed, 5000)
+    const finish = (result: MobileSendResult) => {
+      clearTimeout(timer)
+      pendingSends.delete(id)
+      contents.removeListener('destroyed', onDestroyed)
+      resolve(result)
+    }
+    pendingSends.set(id, { contents, finish })
+    contents.once('destroyed', onDestroyed)
+    try {
+      contents.send(MOBILE_SYNC_CHANNELS.sendCommand, id, command)
+    } catch {
+      finish(unavailable)
+    }
+  })
 }
 
 function collectDirectHermesCredentials(): DirectHermesCredential[] {
@@ -54,6 +83,7 @@ function ensureServer(): MobileSyncServer {
       appVersion: app.getVersion(),
       getDirectCredentials: collectDirectHermesCredentials,
       onCommand: dispatchCommandToRenderer,
+      onSendMessage: dispatchSendToRenderer,
       onStateChange: broadcastState
     })
   }
@@ -69,6 +99,11 @@ export async function stopMobileSyncServer(): Promise<void> {
 export function registerMobileSyncIpc(): void {
   if (registered) return
   registered = true
+
+  ipcMain.on(MOBILE_SYNC_CHANNELS.sendCommandResult, (event, requestId: string, result: MobileSendResult) => {
+    const pending = pendingSends.get(requestId)
+    if (pending?.contents === event.sender) pending.finish(result)
+  })
 
   ipcMain.handle(MOBILE_SYNC_CHANNELS.getState, () => ensureServer().getState())
   ipcMain.handle(MOBILE_SYNC_CHANNELS.start, () => ensureServer().start())

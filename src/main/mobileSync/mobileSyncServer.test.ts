@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { WebSocket } from 'ws'
 import { describe, expect, it } from 'vitest'
-import { buildPairingUri, parsePairingUri, type MobileRelayCommand } from '@shared/mobileSync'
+import { buildPairingUri, parsePairingUri, type MobileRelayCommand, type MobileSendCommand } from '@shared/mobileSync'
 import {
   decryptAesGcmCombined,
   encryptAesGcmCombined,
@@ -56,6 +56,11 @@ describe('MobileSyncServer zero-server LAN bridge', () => {
   it('pairs via QR token, decrypts direct Hermes creds, streams WS deltas, relays commands, and revokes devices', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'botark-msync-'))
     const commands: MobileRelayCommand[] = []
+    const sends: MobileSendCommand[] = []
+    let markEntered!: () => void
+    let allowAck!: () => void
+    const entered = new Promise<void>((resolve) => { markEntered = resolve })
+    const acknowledge = new Promise<void>((resolve) => { allowAck = resolve })
     const srv = new MobileSyncServer({
       storePath: join(dir, 'devices.json'),
       defaultPort: 0,
@@ -69,7 +74,16 @@ describe('MobileSyncServer zero-server LAN bridge', () => {
           displayName: 'Hermes Local'
         }
       ],
-      onCommand: (cmd) => commands.push(cmd)
+      onCommand: (cmd) => commands.push(cmd),
+      onSendMessage: async (cmd) => {
+        if (cmd.botId !== 'bot_1') return { ok: false, status: 404, message: 'Bot not found' }
+        if (cmd.clientMessageId === 'client-1') {
+          markEntered()
+          await acknowledge
+        }
+        sends.push(cmd)
+        return { ok: true, messageId: cmd.clientMessageId }
+      }
     })
 
     try {
@@ -201,7 +215,26 @@ describe('MobileSyncServer zero-server LAN bridge', () => {
           },
           body: body && JSON.stringify(body)
         })
-      expect((await postCommand('bots/bot_1/send', { text: 'Hello!', clientMessageId: 'client-1' })).status).toBe(200)
+      let completed = false
+      const sending = postCommand('bots/bot_1/send', { text: ' Hello! ', clientMessageId: 'client-1' })
+        .then((response) => { completed = true; return response })
+      await entered
+      const retry = postCommand('bots/bot_1/send', { text: 'Hello!', clientMessageId: 'client-1' })
+      try {
+        expect(completed).toBe(false)
+        expect((await postCommand('bots/bot_1/send', { text: 'Different', clientMessageId: 'client-1' })).status).toBe(409)
+      } finally {
+        allowAck()
+      }
+      const sendResponse = await sending
+      expect(sendResponse.status).toBe(200)
+      expect(await sendResponse.json()).toMatchObject({ ok: true, messageId: 'client-1' })
+      expect(await (await retry).json()).toMatchObject({ ok: true, messageId: 'client-1' })
+      expect(sends).toEqual([{ botId: 'bot_1', text: 'Hello!', clientMessageId: 'client-1' }])
+      expect((await postCommand('bots/missing/send', { text: 'Hi', clientMessageId: 'client-2' })).status).toBe(404)
+      expect((await postCommand('bots/bot_1/send', { text: 'Hi', clientMessageId: 'not valid' })).status).toBe(400)
+      expect((await postCommand('bots/bot_1/send', { text: 'Older client' })).status).toBe(200)
+      expect(sends[1]?.clientMessageId).toMatch(/^mobile_/)
       expect((await postCommand('bots/bot_1/stop')).status).toBe(200)
       expect((await postCommand('bots/bot_1/new-session')).status).toBe(200)
       expect((await postCommand('approvals/acc_h1/request%2Fone', {
@@ -209,7 +242,6 @@ describe('MobileSyncServer zero-server LAN bridge', () => {
         decision: 'allow_once'
       })).status).toBe(200)
       expect(commands).toEqual([
-        { kind: 'sendMessage', botId: 'bot_1', text: 'Hello!', clientMessageId: 'client-1' },
         { kind: 'stopGeneration', botId: 'bot_1' },
         { kind: 'newSession', botId: 'bot_1' },
         { kind: 'decideApproval', accountId: 'acc_h1', platformId: 'hermes', approvalId: 'request/one', decision: 'allow_once' }

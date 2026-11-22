@@ -2,6 +2,35 @@ import XCTest
 @testable import BotArk
 
 final class SyncProtocolTests: XCTestCase {
+    func testDesktopSnapshotReconcilesOptimisticSendByID() {
+        let bot = SyncedBot(id: "bot", platformId: .hermes, name: "Fixture", groupId: "group",
+                            activeAccountId: "account", activeSessionId: "session")
+        var current = WorkspaceSnapshot.empty
+        current.bots = [bot]
+        var pending = SyncedMessage(id: "client-id", botId: "bot", accountId: "account", role: "user",
+                                    text: "Draft", createdAt: 1, delivery: "sending")
+        pending.isLocalRelayMessage = true
+        current.messages = ["bot": [pending]]
+
+        var incoming = WorkspaceSnapshot.empty
+        incoming.bots = [bot]
+        incoming.carryLocalRelayMessages(from: current)
+        XCTAssertEqual(incoming.messages["bot"], [pending])
+        XCTAssertEqual(incoming.withoutLocalRelayMessages.messages["bot"], [])
+
+        var confirmed = pending
+        confirmed.isLocalRelayMessage = false
+        confirmed.delivery = "failed"
+        incoming.messages = ["bot": [confirmed]]
+        incoming.carryLocalRelayMessages(from: current)
+        XCTAssertEqual(incoming.messages["bot"], [confirmed])
+
+        incoming.messages = [:]
+        incoming.bots[0].activeSessionId = "new-session"
+        incoming.carryLocalRelayMessages(from: current)
+        XCTAssertNil(incoming.messages["bot"])
+    }
+
     func testParseValidPairingUriWithLanAndTailscaleHosts() {
         let uri = "botark://pair?v=1&hosts=192.168.1.24,100.88.12.5&port=19472&token=abc123token&key=QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI&name=MacBook%20Pro&fp=9A12BC34"
         let payload = PairingPayload.parse(uri)

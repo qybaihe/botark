@@ -1,6 +1,10 @@
 package com.qybaihe.botark
 
 import com.qybaihe.botark.model.PairingPayload
+import com.qybaihe.botark.model.PlatformId
+import com.qybaihe.botark.model.SyncedBot
+import com.qybaihe.botark.model.SyncedMessage
+import com.qybaihe.botark.model.WorkspaceSnapshot
 import com.qybaihe.botark.service.DirectHermesClient
 import com.qybaihe.botark.service.HermesSseParser
 import com.qybaihe.botark.service.SyncCrypto
@@ -11,6 +15,25 @@ import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class SyncProtocolTest {
+    @Test
+    fun desktopSnapshotReconcilesOptimisticSendById() {
+        val bot = SyncedBot("bot", PlatformId.HERMES, "Fixture", activeAccountId = "account", activeSessionId = "session")
+        val pending = SyncedMessage("client-id", "bot", role = "user", text = "Draft", delivery = "sending", isLocalRelayMessage = true)
+        val desktop = WorkspaceSnapshot(bots = listOf(bot))
+        val current = desktop.copy(messages = mapOf("bot" to listOf(pending)))
+
+        val merged = desktop.carryingLocalRelayMessages(current)
+        assertEquals(listOf(pending), merged.messages["bot"])
+        assertEquals(emptyList<SyncedMessage>(), merged.withoutLocalRelayMessages().messages["bot"])
+
+        val confirmed = pending.copy(isLocalRelayMessage = false, delivery = "failed")
+        val desktopWithReceipt = desktop.copy(messages = mapOf("bot" to listOf(confirmed)))
+        assertEquals(listOf(confirmed), desktopWithReceipt.carryingLocalRelayMessages(current).messages["bot"])
+
+        val fresh = desktop.copy(bots = listOf(bot.copy(activeSessionId = "new-session")))
+        assertNull(fresh.carryingLocalRelayMessages(current).messages["bot"])
+    }
+
     @Test
     fun parseValidPairingUriWithLanAndTailscaleHosts() {
         val uri = "botark://pair?v=1&hosts=192.168.1.24,100.88.12.5&port=19472&token=abc123token&key=QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI&name=MacBook%20Pro&fp=9A12BC34"

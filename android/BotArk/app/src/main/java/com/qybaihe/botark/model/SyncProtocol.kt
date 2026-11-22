@@ -2,6 +2,7 @@ package com.qybaihe.botark.model
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 import java.net.URI
 import java.net.URLDecoder
 
@@ -136,7 +137,8 @@ data class SyncedMessage(
     val delivery: String? = null,
     val error: String? = null,
     val tools: List<SyncedToolCall>? = null,
-    val media: List<SyncedMediaPart>? = null
+    val media: List<SyncedMediaPart>? = null,
+    @Transient val isLocalRelayMessage: Boolean = false
 ) {
     val isUser: Boolean get() = role == "user"
 }
@@ -168,6 +170,23 @@ data class WorkspaceSnapshot(
     companion object {
         val EMPTY = WorkspaceSnapshot()
     }
+
+    internal fun carryingLocalRelayMessages(current: WorkspaceSnapshot): WorkspaceSnapshot {
+        val previousBots = current.bots.associateBy { it.id }
+        val merged = messages.toMutableMap()
+        for (bot in bots) {
+            val previous = previousBots[bot.id] ?: continue
+            if (previous.activeAccountId != bot.activeAccountId || previous.activeSessionId != bot.activeSessionId) continue
+            val received = messages[bot.id].orEmpty()
+            val receivedIds = received.mapTo(hashSetOf()) { it.id }
+            val pending = current.messages[bot.id].orEmpty().filter { it.isLocalRelayMessage && it.id !in receivedIds }
+            if (pending.isNotEmpty()) merged[bot.id] = received + pending
+        }
+        return copy(messages = merged)
+    }
+
+    internal fun withoutLocalRelayMessages() =
+        copy(messages = messages.mapValues { (_, list) -> list.filterNot { it.isLocalRelayMessage } })
 }
 
 @Serializable

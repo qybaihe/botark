@@ -70,7 +70,7 @@ class SecureVault(private val context: Context) {
     fun saveSnapshotCache(snapshot: WorkspaceSnapshot) {
         runCatching {
             val tmp = File(context.filesDir, "workspace-cache.json.tmp")
-            tmp.writeText(json.encodeToString(snapshot))
+            tmp.writeText(json.encodeToString(snapshot.withoutLocalRelayMessages()))
             tmp.renameTo(cacheFile)
         }
     }

@@ -59,6 +59,8 @@ import type {
 import type {
   MobileBridgeLiveEvent,
   MobileRelayCommand,
+  MobileSendCommand,
+  MobileSendResult,
   MobileSyncStateView,
   MobileWorkspaceSnapshot
 } from './mobileSync'
@@ -232,6 +234,7 @@ export interface MobileSyncBridge {
   pushEvent(event: MobileBridgeLiveEvent): void
   onStateChanged(listener: (state: MobileSyncStateView) => void): () => void
   onCommand(listener: (command: MobileRelayCommand) => void): () => void
+  onSendCommand(listener: (command: MobileSendCommand) => MobileSendResult): () => void
 }
 
 export interface VaultBridge {

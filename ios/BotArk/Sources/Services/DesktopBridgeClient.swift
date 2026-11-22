@@ -140,8 +140,9 @@ public actor DesktopBridgeClient {
         return try JSONDecoder().decode(Wrapper.self, from: data).snapshot
     }
 
-    public func sendMessage(desktop: PairedDesktopInfo, botId: String, text: String, clientMessageId: String) async throws {
-        let encodedBot = botId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? botId
+    public func sendMessage(desktop: PairedDesktopInfo, botId: String, text: String, clientMessageId: String) async throws -> String? {
+        let pathSegment = CharacterSet.urlPathAllowed.subtracting(CharacterSet(charactersIn: "/?#%"))
+        let encodedBot = botId.addingPercentEncoding(withAllowedCharacters: pathSegment) ?? botId
         guard let url = URL(string: "http://\(desktop.activeHost):\(desktop.port)/api/mobile/v1/bots/\(encodedBot)/send") else {
             throw DesktopBridgeError.invalidResponse("Invalid URL")
         }
@@ -153,10 +154,15 @@ public actor DesktopBridgeClient {
             "text": text,
             "clientMessageId": clientMessageId
         ])
-        let (_, resp) = try await session.data(for: req)
+        let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw DesktopBridgeError.invalidResponse("No status") }
         if http.statusCode == 401 { throw DesktopBridgeError.unauthorized }
-        guard http.statusCode == 200 else { throw DesktopBridgeError.serverError("发送失败（HTTP \(http.statusCode)）") }
+        struct SendResponse: Decodable { let messageId: String?; let message: String? }
+        let payload = try? JSONDecoder().decode(SendResponse.self, from: data)
+        guard http.statusCode == 200 else {
+            throw DesktopBridgeError.serverError(payload?.message ?? "发送失败（HTTP \(http.statusCode)）")
+        }
+        return payload?.messageId
     }
 
     public func stopGeneration(desktop: PairedDesktopInfo, botId: String) async {

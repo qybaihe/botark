@@ -4,6 +4,7 @@ import { getPlatform } from '@adapters/platforms'
 import { adapterRegistry } from '@adapters/registry'
 import { AdapterError, type AttachmentMeta, type ConnectionStatus, type IncomingMessage, type PlatformId } from '@adapters/types'
 import { createId } from '@shared/id'
+import type { MobileSendCommand, MobileSendResult } from '@shared/mobileSync'
 import { createSeed } from '@/data/seed'
 import type { AccountDraft, Bot, BotAccount, BotGroup, ChatMessage, ChatReplyTarget, NewBotInput } from '@/types'
 import { clearNoReplyFlag, createSafeStorage, sanitizePersisted, SEND_HARD_TIMEOUT_MS, SendTimeoutError, toPersistedMessages, withTimeout, deliveryAfterError, createInFlightSet, hasLostAttachments, ATTACHMENTS_LOST_TEXT } from './delivery'
@@ -129,6 +130,7 @@ export interface BotHubState {
 
   // Conversation
   sendMessage: (botId: string, text: string, attachments?: AttachmentMeta[]) => Promise<void>
+  queueMobileMessage: (command: MobileSendCommand) => MobileSendResult
   retryMessage: (botId: string, messageId: string) => Promise<void>
   receiveMessage: (message: IncomingMessage) => void
   /** Upsert a streaming assistant bubble (same id updated as deltas arrive). */
@@ -420,11 +422,12 @@ export const useBotStore = create<BotHubState>()(
 
   /** Hand a stored user message to the bot's platform adapter. */
   const deliver = async (botId: string, messageId: string) => {
-    if (!inFlight.enter(messageId)) return
+    const key = JSON.stringify([botId, messageId])
+    if (!inFlight.enter(key)) return
     try {
       await deliverOnce(botId, messageId)
     } finally {
-      inFlight.leave(messageId)
+      inFlight.leave(key)
     }
   }
 
@@ -496,6 +499,31 @@ export const useBotStore = create<BotHubState>()(
         updateMessage(botId, messageId, deliveryAfterError(accepted, 'other', errorMessage(error)))
       }
     }
+  }
+
+  const enqueueUserMessage = (bot: Bot, text: string, attachments?: AttachmentMeta[], clientMessageId?: string) => {
+    const botId = bot.id
+    const replyTarget = clientMessageId ? undefined : get().replyingTo[botId]
+    const message: ChatMessage = {
+      id: clientMessageId ?? createId('msg'),
+      botId,
+      accountId: bot.activeAccountId,
+      ...(bot.selectedAgentId ? { agentId: bot.selectedAgentId } : {}),
+      role: 'user',
+      text,
+      createdAt: Date.now(),
+      delivery: 'sending',
+      ...(replyTarget ? { replyToId: replyTarget.entryId, replyQuote: replyTarget.quote } : {}),
+      attachments: attachments?.length ? attachments : undefined
+    }
+    set((state) => {
+      const { [botId]: _clearedReply, ...restReplies } = state.replyingTo
+      return {
+        replyingTo: clientMessageId ? state.replyingTo : restReplies,
+        messages: { ...state.messages, [botId]: [...(state.messages[botId] ?? []), message] }
+      }
+    })
+    return message.id
   }
 
   return {
@@ -829,34 +857,34 @@ export const useBotStore = create<BotHubState>()(
     },
 
     sendMessage: async (botId, text, attachments) => {
-      const stateBefore = get()
-      const bot = stateBefore.bots.find((b) => b.id === botId)
+      const bot = get().bots.find((b) => b.id === botId)
       const trimmed = text.trim()
       if (!bot || (!trimmed && !attachments?.length)) return
-      const replyTarget = stateBefore.replyingTo[botId]
+      await deliver(botId, enqueueUserMessage(bot, trimmed, attachments))
+    },
 
-      const message: ChatMessage = {
-        id: createId('msg'),
-        botId,
-        accountId: bot.activeAccountId,
-        ...(bot.selectedAgentId ? { agentId: bot.selectedAgentId } : {}),
-        role: 'user',
-        text: trimmed,
-        createdAt: Date.now(),
-        delivery: 'sending',
-        ...(replyTarget
-          ? { replyToId: replyTarget.entryId, replyQuote: replyTarget.quote }
-          : {}),
-        attachments: attachments?.length ? attachments : undefined
+    queueMobileMessage: ({ botId, text, clientMessageId }) => {
+      const state = get()
+      const bot = state.bots.find((b) => b.id === botId)
+      if (!bot) return { ok: false, status: 404, message: 'Bot no longer exists on the desktop' }
+      const trimmed = text.trim()
+      if (!trimmed) return { ok: false, status: 400, message: 'Message text is required' }
+      const existing = state.messages[botId]?.find((m) => m.id === clientMessageId)
+      if (existing) {
+        return existing.role === 'user' && existing.text === trimmed
+          ? { ok: true, messageId: existing.id }
+          : { ok: false, status: 409, message: 'Message ID is already in use' }
       }
-      set((state) => {
-        const { [botId]: _clearedReply, ...restReplies } = state.replyingTo
-        return {
-          replyingTo: restReplies,
-          messages: { ...state.messages, [botId]: [...(state.messages[botId] ?? []), message] }
-        }
-      })
-      await deliver(botId, message.id)
+      const account = state.accounts[bot.activeAccountId]
+      if (!account || account.status === 'offline' || account.status === 'error') {
+        return { ok: false, status: 409, message: 'Bot account is not connected on the desktop' }
+      }
+      if (!adapterRegistry.has(bot.platformId)) {
+        return { ok: false, status: 503, message: 'Bot platform is unavailable on the desktop' }
+      }
+      const messageId = enqueueUserMessage(bot, trimmed, undefined, clientMessageId)
+      void deliver(botId, messageId)
+      return { ok: true, messageId }
     },
 
     retryMessage: async (botId, messageId) => {

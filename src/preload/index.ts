@@ -21,6 +21,8 @@ import {
 import {
   MOBILE_SYNC_CHANNELS,
   type MobileRelayCommand,
+  type MobileSendCommand,
+  type MobileSendResult,
   type MobileSyncStateView
 } from '@shared/mobileSync'
 
@@ -191,6 +193,19 @@ const bridge: BotHubBridge = {
       const handler = (_event: unknown, payload: MobileRelayCommand) => listener(payload)
       ipcRenderer.on(MOBILE_SYNC_CHANNELS.command, handler)
       return () => ipcRenderer.removeListener(MOBILE_SYNC_CHANNELS.command, handler)
+    },
+    onSendCommand: (listener) => {
+      const handler = (_event: unknown, requestId: string, command: MobileSendCommand) => {
+        let result: MobileSendResult
+        try {
+          result = listener(command)
+        } catch {
+          result = { ok: false, status: 503, message: 'Desktop could not queue the message' }
+        }
+        ipcRenderer.send(MOBILE_SYNC_CHANNELS.sendCommandResult, requestId, result)
+      }
+      ipcRenderer.on(MOBILE_SYNC_CHANNELS.sendCommand, handler)
+      return () => ipcRenderer.removeListener(MOBILE_SYNC_CHANNELS.sendCommand, handler)
     }
   },
   vault: {
