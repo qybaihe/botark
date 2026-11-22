@@ -102,7 +102,13 @@ function createMainWindow(): BrowserWindow {
   const views = attachWebViewManager(win)
   attachMuseSessionManager(win, views)
 
-  win.once('ready-to-show', () => win.show())
+  const showMainWindow = (): void => {
+    if (win.isDestroyed()) return
+    if (!win.isVisible()) win.show()
+  }
+  win.once('ready-to-show', showMainWindow)
+  win.webContents.once('did-finish-load', showMainWindow)
+  setTimeout(showMainWindow, 1500)
 
   // macOS: the red button hides the window instead of destroying it. A
   // re-created window used to start a second Muse session manager while the
