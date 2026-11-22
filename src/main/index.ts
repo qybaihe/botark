@@ -34,7 +34,14 @@ try {
   const appData = app.getPath('appData')
   const newUserData = join(appData, 'botark')
   const legacyUserData = join(appData, 'bothub')
-  if (!existsSync(newUserData) && existsSync(legacyUserData)) {
+  const legacyHasData =
+    existsSync(join(legacyUserData, 'Partitions')) ||
+    existsSync(join(legacyUserData, 'grok-sand-tokens.json'))
+  const newHasData =
+    existsSync(join(newUserData, 'Partitions')) ||
+    existsSync(join(newUserData, 'grok-sand-tokens.json')) ||
+    existsSync(join(newUserData, 'cue-tokens.json'))
+  if (existsSync(legacyUserData) && (legacyHasData || !existsSync(newUserData)) && !newHasData) {
     app.setPath('userData', legacyUserData)
   }
 } catch {
@@ -71,6 +78,7 @@ process.on('uncaughtException', (error) => {
 })
 
 function createMainWindow(): BrowserWindow {
+  const iconPath = join(__dirname, '../../build/icon.png')
   const win = new BrowserWindow({
     width: 1360,
     height: 860,
@@ -80,6 +88,7 @@ function createMainWindow(): BrowserWindow {
     title: 'BotArk',
     backgroundColor: '#f7f7f8',
     autoHideMenuBar: true,
+    ...(existsSync(iconPath) ? { icon: iconPath } : {}),
     ...(isMac ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 18, y: 28 } } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
