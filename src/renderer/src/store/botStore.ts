@@ -377,15 +377,37 @@ export function poolAccountIds(accounts: Record<string, { id: string; platformId
 export const useBotStore = create<BotHubState>()(
   persist((set, get) => {
   const updateMessage = (botId: string, messageId: string, patch: Partial<ChatMessage>) =>
-    set((state) => ({
-      messages: {
-        ...state.messages,
-        [botId]: (state.messages[botId] ?? []).map((m) => (m.id === messageId ? { ...m, ...patch } : m))
+    set((state) => {
+      const list = state.messages[botId]
+      if (!list?.some((m) => m.id === messageId)) return state
+      return {
+        messages: { ...state.messages, [botId]: list.map((m) => (m.id === messageId ? { ...m, ...patch } : m)) }
       }
-    }))
+    })
 
   const patchBot = (botId: string, patch: (bot: Bot) => Partial<Bot>) =>
     set((state) => ({ bots: state.bots.map((b) => (b.id === botId ? { ...b, ...patch(b) } : b)) }))
+
+  // An account or session can be selected again while an earlier request for it is still pending.
+  const sessionSelections = new Map<string, symbol>()
+  const markSessionSelection = (botId: string) => {
+    const selection = Symbol()
+    sessionSelections.set(botId, selection)
+    return selection
+  }
+  const getBotForSessionSelection = (bot: Bot, selection: symbol | undefined) => {
+    if (sessionSelections.get(bot.id) !== selection) return undefined
+    const current = get().bots.find((b) => b.id === bot.id)
+    if (!current || current.activeAccountId !== bot.activeAccountId || current.selectedAgentId !== bot.selectedAgentId) {
+      return undefined
+    }
+    return current
+  }
+  const setFreshSession = (botId: string, activeSessionId: string | undefined) =>
+    set((state) => ({
+      bots: state.bots.map((bot) => (bot.id === botId ? { ...bot, activeSessionId } : bot)),
+      messages: { ...state.messages, [botId]: [] }
+    }))
 
   const patchAccount = (accountId: string, patch: Partial<BotAccount>) =>
     set((state) => {
@@ -418,8 +440,16 @@ export const useBotStore = create<BotHubState>()(
       return
     }
 
+    const selection = sessionSelections.get(botId)
     const applyReceipt = (receipt: import('@adapters/types').SendReceipt) => {
-      if (receipt.sessionId && receipt.sessionId !== bot.activeSessionId) {
+      const current = getBotForSessionSelection(bot, selection)
+      if (
+        current &&
+        current.activeAccountId === message.accountId &&
+        current.activeSessionId === bot.activeSessionId &&
+        receipt.sessionId &&
+        receipt.sessionId !== current.activeSessionId
+      ) {
         patchBot(botId, () => ({ activeSessionId: receipt.sessionId }))
       }
       updateMessage(
@@ -758,6 +788,7 @@ export const useBotStore = create<BotHubState>()(
       const state = get()
       const bot = state.bots.find((b) => b.id === botId)
       if (!bot) return
+      sessionSelections.delete(botId)
       const orphaned = bot.accountIds.filter((id) => !state.bots.some((b) => b.id !== botId && b.accountIds.includes(id)))
       const ordered = state.groups.flatMap((g) => state.bots.filter((b) => b.groupId === g.id))
       const index = ordered.findIndex((b) => b.id === botId)
@@ -1176,13 +1207,12 @@ export const useBotStore = create<BotHubState>()(
     switchMuseSession: async (botId, sessionId) => {
       const bot = get().bots.find((b) => b.id === botId)
       if (!bot || bot.platformId !== 'meta-muse') return
+      const selection = markSessionSelection(botId)
       patchBot(botId, () => ({ activeSessionId: sessionId }))
       const bridge = electronBridge()
       if (!bridge?.muse?.loadSessionHistory) return
       const rows = await bridge.muse.loadSessionHistory(bot.activeAccountId, sessionId)
-      // Guard against stale async response if user switched sessions again
-      const latestBot = get().bots.find((b) => b.id === botId)
-      if (!latestBot || latestBot.activeSessionId !== sessionId) return
+      if (getBotForSessionSelection(bot, selection)?.activeSessionId !== sessionId) return
       const hydrated: ChatMessage[] = rows.map((r) => ({
         id: r.id,
         botId,
@@ -1204,6 +1234,7 @@ export const useBotStore = create<BotHubState>()(
     startNewMuseSession: async (botId) => {
       const bot = get().bots.find((b) => b.id === botId)
       if (!bot || bot.platformId !== 'meta-muse') return
+      const selection = markSessionSelection(botId)
       const bridge = electronBridge()
       let newSessionId: string | undefined
       if (bridge?.muse?.startSession) {
@@ -1214,15 +1245,13 @@ export const useBotStore = create<BotHubState>()(
           /* ignore */
         }
       }
-      patchBot(botId, () => ({ activeSessionId: newSessionId }))
-      set((s) => ({
-        messages: { ...s.messages, [botId]: [] }
-      }))
+      if (getBotForSessionSelection(bot, selection)) setFreshSession(botId, newSessionId)
     },
 
     switchHermesSession: async (botId, sessionId) => {
       const bot = get().bots.find((b) => b.id === botId)
       if (!bot || bot.platformId !== 'hermes') return
+      const selection = markSessionSelection(botId)
       patchBot(botId, () => ({ activeSessionId: sessionId }))
       const bridge = electronBridge()
       if (!bridge?.hermes?.rpc) return
@@ -1231,6 +1260,7 @@ export const useBotStore = create<BotHubState>()(
         op: 'getSessionMessages',
         sessionId
       })
+      if (getBotForSessionSelection(bot, selection)?.activeSessionId !== sessionId) return
       if (!res.ok || !Array.isArray(res.data)) return
       const rows = res.data as Array<{
         id: string
@@ -1259,6 +1289,7 @@ export const useBotStore = create<BotHubState>()(
     startNewHermesSession: async (botId) => {
       const bot = get().bots.find((b) => b.id === botId)
       if (!bot || bot.platformId !== 'hermes') return
+      const selection = markSessionSelection(botId)
       const bridge = electronBridge()
       let newSessionId: string | undefined
       if (bridge?.hermes?.rpc) {
@@ -1276,15 +1307,13 @@ export const useBotStore = create<BotHubState>()(
           /* ignore — adapter creates session lazily on first message if unsupported */
         }
       }
-      patchBot(botId, () => ({ activeSessionId: newSessionId }))
-      set((s) => ({
-        messages: { ...s.messages, [botId]: [] }
-      }))
+      if (getBotForSessionSelection(bot, selection)) setFreshSession(botId, newSessionId)
     },
 
     switchAntigravitySession: async (botId, sessionId) => {
       const bot = get().bots.find((b) => b.id === botId)
       if (!bot || bot.platformId !== 'antigravity') return
+      const selection = markSessionSelection(botId)
       patchBot(botId, () => ({ activeSessionId: sessionId }))
       const bridge = electronBridge()
       if (!bridge?.antigravity?.rpc) return
@@ -1293,6 +1322,7 @@ export const useBotStore = create<BotHubState>()(
         action: 'getConversation',
         conversationId: sessionId
       })
+      if (getBotForSessionSelection(bot, selection)?.activeSessionId !== sessionId) return
       if (!res.ok || !res.data || typeof res.data !== 'object') return
       const rows = (
         res.data as {
@@ -1324,10 +1354,8 @@ export const useBotStore = create<BotHubState>()(
     startNewAntigravitySession: (botId) => {
       const bot = get().bots.find((b) => b.id === botId)
       if (!bot || bot.platformId !== 'antigravity') return
-      patchBot(botId, () => ({ activeSessionId: undefined }))
-      set((s) => ({
-        messages: { ...s.messages, [botId]: [] }
-      }))
+      markSessionSelection(botId)
+      setFreshSession(botId, undefined)
     },
 
     updateNotes: (botId, notes) => patchBot(botId, () => ({ notes })),
@@ -1348,6 +1376,7 @@ export const useBotStore = create<BotHubState>()(
         // A bot always keeps at least one account.
         if (bot.accountIds.length <= 1 || !bot.accountIds.includes(accountId)) return {}
         const accountIds = bot.accountIds.filter((id) => id !== accountId)
+        if (bot.activeAccountId === accountId) markSessionSelection(botId)
         return {
           accountIds,
           activeAccountId: bot.activeAccountId === accountId ? accountIds[0]! : bot.activeAccountId
@@ -1356,7 +1385,9 @@ export const useBotStore = create<BotHubState>()(
 
     setActiveAccount: (botId, accountId) => {
       set((state) => {
-        if (!state.bots.some((b) => b.id === botId && b.accountIds.includes(accountId))) return state
+        const bot = state.bots.find((b) => b.id === botId && b.accountIds.includes(accountId))
+        if (!bot) return state
+        if (bot.activeAccountId !== accountId) markSessionSelection(botId)
         const account = state.accounts[accountId]
         return {
           bots: state.bots.map((b) =>
@@ -1377,7 +1408,9 @@ export const useBotStore = create<BotHubState>()(
       const trimmed = agentId.trim()
       if (!trimmed) return
       const botBefore = get().bots.find((b) => b.id === botId)
-      const adapterBefore = botBefore ? adapterRegistry.get(botBefore.platformId) : undefined
+      if (!botBefore) return
+      const selection = markSessionSelection(botId)
+      const adapterBefore = adapterRegistry.get(botBefore.platformId)
       const grokAdapter = adapterBefore as
         | {
             listCachedAgents?: (accId: string) => Array<{
@@ -1389,10 +1422,8 @@ export const useBotStore = create<BotHubState>()(
             bindConversationAgent?: (c: string, a: string, accId?: string) => void
           }
         | undefined
-      const matchedAgent = botBefore
-        ? grokAdapter?.listCachedAgents?.(botBefore.activeAccountId)?.find((a) => a.id === trimmed)
-        : undefined
-      const prevAgentId = botBefore?.selectedAgentId
+      const matchedAgent = grokAdapter?.listCachedAgents?.(botBefore.activeAccountId)?.find((a) => a.id === trimmed)
+      const prevAgentId = botBefore.selectedAgentId
       patchBot(botId, (b) => ({
         selectedAgentId: trimmed,
         ...(matchedAgent?.avatarShape ? { avatarShape: matchedAgent.avatarShape } : {}),
@@ -1423,9 +1454,8 @@ export const useBotStore = create<BotHubState>()(
               limit: 60
             })
             .then((res) => {
-              // Guard against stale response if user switched agents again before RPC resolved
-              const latestBot = get().bots.find((b) => b.id === botId)
-              if (!latestBot || latestBot.selectedAgentId !== trimmed) return
+              const latestBot = getBotForSessionSelection(bot, selection)
+              if (!latestBot || latestBot.activeSessionId !== bot.activeSessionId) return
               if (!res.ok || !res.data || typeof res.data !== 'object') return
               const root = res.data as Record<string, unknown>
               // Prefer pre-decoded, chronological `hydrated` array with presigned media URLs from main
@@ -2182,6 +2212,7 @@ export const useBotStore = create<BotHubState>()(
     resetWorkspace: async () => {
       await get().clearAllCredentials()
       const fresh = createSeed()
+      sessionSelections.clear()
       set({
         groups: fresh.groups,
         bots: fresh.bots,
