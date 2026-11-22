@@ -191,22 +191,29 @@ describe('MobileSyncServer zero-server LAN bridge', () => {
         text: 'Streaming to iPhone…'
       })
 
-      // 7. Send message from iOS -> relayed to Desktop onCommand
-      const sendRes = await fetch(`${base}/api/mobile/v1/bots/bot_1/send`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${pairJson.deviceToken}`
-        },
-        body: JSON.stringify({ text: 'Hello from iPhone!' })
-      })
-      expect(sendRes.status).toBe(200)
-      expect(commands).toContainEqual({
-        kind: 'sendMessage',
-        botId: 'bot_1',
-        text: 'Hello from iPhone!',
-        clientMessageId: undefined
-      })
+      // 7. Both companion apps use the same authenticated command routes.
+      const postCommand = (path: string, body?: Record<string, string>) =>
+        fetch(`${base}/api/mobile/v1/${path}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${pairJson.deviceToken}`
+          },
+          body: body && JSON.stringify(body)
+        })
+      expect((await postCommand('bots/bot_1/send', { text: 'Hello!', clientMessageId: 'client-1' })).status).toBe(200)
+      expect((await postCommand('bots/bot_1/stop')).status).toBe(200)
+      expect((await postCommand('bots/bot_1/new-session')).status).toBe(200)
+      expect((await postCommand('approvals/acc_h1/request%2Fone', {
+        platformId: 'hermes',
+        decision: 'allow_once'
+      })).status).toBe(200)
+      expect(commands).toEqual([
+        { kind: 'sendMessage', botId: 'bot_1', text: 'Hello!', clientMessageId: 'client-1' },
+        { kind: 'stopGeneration', botId: 'bot_1' },
+        { kind: 'newSession', botId: 'bot_1' },
+        { kind: 'decideApproval', accountId: 'acc_h1', platformId: 'hermes', approvalId: 'request/one', decision: 'allow_once' }
+      ])
 
       // 8. Export offline AirDrop encrypted bundle and verify decryption
       const bundle = srv.createOfflineEncryptedBundle()

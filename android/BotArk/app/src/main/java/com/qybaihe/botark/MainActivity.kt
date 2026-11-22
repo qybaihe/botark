@@ -32,6 +32,8 @@ import androidx.compose.material.icons.rounded.ChatBubble
 import androidx.compose.material.icons.rounded.Sensors
 import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material3.Icon
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -141,6 +143,7 @@ private fun BotArkRoot(
 ) {
     val palette = ArkColors.current
     val state by viewModel.uiState.collectAsState()
+    val commandSnackbar = remember { SnackbarHostState() }
 
     var currentTab by remember { mutableStateOf(initialTab) }
     var activeBotId by remember { mutableStateOf(initialOpenBotId) }
@@ -159,6 +162,9 @@ private fun BotArkRoot(
 
     LaunchedEffect(initialTab) { currentTab = initialTab }
     LaunchedEffect(initialOpenBotId) { activeBotId = initialOpenBotId }
+    LaunchedEffect(viewModel) {
+        viewModel.commandErrors.collect { commandSnackbar.showSnackbar(it) }
+    }
 
     Box(
         modifier = Modifier
@@ -231,6 +237,10 @@ private fun BotArkRoot(
                 }
             )
         }
+        SnackbarHost(
+            hostState = commandSnackbar,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = if (activeBotId == null) 72.dp else 0.dp)
+        )
     }
 
     if (showScanner) {

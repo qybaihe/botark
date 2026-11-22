@@ -23,11 +23,14 @@ import com.qybaihe.botark.service.DesktopBridgeException
 import com.qybaihe.botark.service.DirectHermesClient
 import com.qybaihe.botark.service.SecureVault
 import com.qybaihe.botark.service.SyncCrypto
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
@@ -102,10 +105,13 @@ class BotArkViewModel(application: Application) : AndroidViewModel(application) 
 
     private val _uiState = MutableStateFlow(BotArkUiState())
     val uiState: StateFlow<BotArkUiState> = _uiState.asStateFlow()
+    private val commandErrorChannel = Channel<String>(Channel.BUFFERED)
+    val commandErrors = commandErrorChannel.receiveAsFlow()
 
     private var reconnectJob: Job? = null
     private var reconnectAttempt: Int = 0
     private val directJobs = mutableMapOf<String, Job>()
+    private val pendingDesktopApprovals = mutableSetOf<Pair<String, String>>()
 
     init {
         val desktop = vault.loadPairedDesktop()
@@ -451,18 +457,22 @@ class BotArkViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun stopGeneration(bot: SyncedBot) {
-        setTyping(bot.id, false)
         directJobs.remove(bot.id)?.cancel()
         val desktop = _uiState.value.pairedDesktop
         if (desktop != null && _uiState.value.connectionState.isBridgeConnected) {
-            viewModelScope.launch { bridge.stopGeneration(desktop, bot.id) }
+            launchDesktopCommand("停止生成失败") {
+                bridge.stopGeneration(desktop, bot.id)
+                setTyping(bot.id, false)
+            }
+        } else {
+            setTyping(bot.id, false)
         }
     }
 
     fun startNewSession(bot: SyncedBot) {
         val desktop = _uiState.value.pairedDesktop
         if (desktop != null && _uiState.value.connectionState.isBridgeConnected) {
-            viewModelScope.launch { bridge.startNewSession(desktop, bot.id) }
+            launchDesktopCommand("新建会话失败") { bridge.startNewSession(desktop, bot.id) }
         } else {
             _uiState.update { st ->
                 val bots = st.snapshot.bots.map {
@@ -477,22 +487,46 @@ class BotArkViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun decideApproval(item: PendingApprovalItem, decision: String) {
+        val state = _uiState.value
+        val desktop = state.pairedDesktop
+        if (desktop != null && state.connectionState.isBridgeConnected) {
+            launchDesktopCommand("审批提交失败") {
+                val key = item.accountId to item.approval.id
+                if (!pendingDesktopApprovals.add(key)) return@launchDesktopCommand
+                try {
+                    bridge.decideApproval(desktop, item.accountId, item.platformId, item.approval.id, decision)
+                    dismissApproval(item)
+                } finally {
+                    pendingDesktopApprovals.remove(key)
+                }
+            }
+        } else if (item.platformId == PlatformId.HERMES) {
+            val credential = state.directHermesCredentials.firstOrNull { it.accountId == item.accountId } ?: return
+            dismissApproval(item)
+            viewModelScope.launch {
+                runCatching { directHermes.decideApproval(credential, item.approval.id, decision) }
+            }
+        }
+    }
+
+    private fun dismissApproval(item: PendingApprovalItem) {
         _uiState.update { st ->
             val map = st.snapshot.approvals.toMutableMap()
             map[item.accountId] = map[item.accountId].orEmpty().filterNot { it.id == item.approval.id }
             st.copy(snapshot = st.snapshot.copy(approvals = map))
         }
-        val state = _uiState.value
-        val desktop = state.pairedDesktop
+    }
+
+    private fun launchDesktopCommand(failure: String, action: suspend () -> Unit) {
         viewModelScope.launch {
-            if (desktop != null && state.connectionState.isBridgeConnected) {
-                runCatching {
-                    bridge.decideApproval(desktop, item.accountId, item.platformId, item.approval.id, decision)
-                }
-            } else if (item.platformId == PlatformId.HERMES) {
-                state.directHermesCredentials.firstOrNull { it.accountId == item.accountId }?.let { cred ->
-                    runCatching { directHermes.decideApproval(cred, item.approval.id, decision) }
-                }
+            try {
+                action()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: DesktopBridgeException) {
+                commandErrorChannel.send(e.message ?: failure)
+            } catch (_: Exception) {
+                commandErrorChannel.send(failure)
             }
         }
     }

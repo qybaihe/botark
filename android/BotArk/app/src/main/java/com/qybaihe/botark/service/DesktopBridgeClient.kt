@@ -19,9 +19,11 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.HttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.WebSocket
@@ -39,35 +41,31 @@ private data class PairRequestBody(
 
 @Serializable
 private data class SendMessageBody(
-    val botId: String,
     val text: String,
     val clientMessageId: String
 )
 
 @Serializable
-private data class BotActionBody(val botId: String)
-
-@Serializable
 private data class ApprovalDecisionBody(
-    val accountId: String,
     val platformId: String,
-    val approvalId: String,
     val decision: String
 )
 
-class DesktopBridgeClient {
+class DesktopBridgeClient internal constructor(private val client: OkHttpClient) {
+    constructor() : this(
+        OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .pingInterval(20, TimeUnit.SECONDS)
+            .build()
+    )
+
     private val json = Json { ignoreUnknownKeys = true }
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
 
     private val probeClient = OkHttpClient.Builder()
         .connectTimeout(2500, TimeUnit.MILLISECONDS)
         .readTimeout(2500, TimeUnit.MILLISECONDS)
-        .build()
-
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .pingInterval(20, TimeUnit.SECONDS)
         .build()
 
     @Volatile
@@ -172,35 +170,17 @@ class DesktopBridgeClient {
         botId: String,
         text: String,
         clientMessageId: String
-    ) = withContext(Dispatchers.IO) {
-        val body = json.encodeToString(SendMessageBody(botId, text, clientMessageId))
-        val req = Request.Builder()
-            .url("http://${desktop.activeHost}:${desktop.port}/api/mobile/v1/messages/send")
-            .header("Authorization", "Bearer ${desktop.deviceToken}")
-            .post(body.toRequestBody(jsonMedia))
-            .build()
-        client.newCall(req).execute().use { resp ->
-            if (resp.code == 401) throw DesktopBridgeException("授权已失效", unauthorized = true)
-            if (!resp.isSuccessful) throw DesktopBridgeException("发送失败（HTTP ${resp.code}）")
-        }
+    ) {
+        val body = json.encodeToString(SendMessageBody(text, clientMessageId))
+        postCommand(desktop, "bots", botId, "send", failure = "发送失败", body = body.toRequestBody(jsonMedia))
     }
 
-    suspend fun stopGeneration(desktop: PairedDesktopInfo, botId: String) = withContext(Dispatchers.IO) {
-        val req = Request.Builder()
-            .url("http://${desktop.activeHost}:${desktop.port}/api/mobile/v1/messages/stop")
-            .header("Authorization", "Bearer ${desktop.deviceToken}")
-            .post(json.encodeToString(BotActionBody(botId)).toRequestBody(jsonMedia))
-            .build()
-        runCatching { client.newCall(req).execute().close() }
+    suspend fun stopGeneration(desktop: PairedDesktopInfo, botId: String) {
+        postCommand(desktop, "bots", botId, "stop", failure = "停止生成失败")
     }
 
-    suspend fun startNewSession(desktop: PairedDesktopInfo, botId: String) = withContext(Dispatchers.IO) {
-        val req = Request.Builder()
-            .url("http://${desktop.activeHost}:${desktop.port}/api/mobile/v1/sessions/new")
-            .header("Authorization", "Bearer ${desktop.deviceToken}")
-            .post(json.encodeToString(BotActionBody(botId)).toRequestBody(jsonMedia))
-            .build()
-        runCatching { client.newCall(req).execute().close() }
+    suspend fun startNewSession(desktop: PairedDesktopInfo, botId: String) {
+        postCommand(desktop, "bots", botId, "new-session", failure = "新建会话失败")
     }
 
     suspend fun decideApproval(
@@ -209,17 +189,35 @@ class DesktopBridgeClient {
         platformId: PlatformId,
         approvalId: String,
         decision: String
-    ) = withContext(Dispatchers.IO) {
-        val body = json.encodeToString(
-            ApprovalDecisionBody(accountId, platformId.wireId, approvalId, decision)
+    ) {
+        val body = json.encodeToString(ApprovalDecisionBody(platformId.wireId, decision))
+        postCommand(
+            desktop, "approvals", accountId, approvalId,
+            failure = "审批提交失败", body = body.toRequestBody(jsonMedia)
         )
+    }
+
+    private suspend fun postCommand(
+        desktop: PairedDesktopInfo,
+        vararg path: String,
+        failure: String,
+        body: RequestBody = ByteArray(0).toRequestBody()
+    ) = withContext(Dispatchers.IO) {
+        val url = HttpUrl.Builder()
+            .scheme("http")
+            .host(desktop.activeHost)
+            .port(desktop.port)
+            .addPathSegments("api/mobile/v1")
+            .apply { path.forEach { addPathSegment(it) } }
+            .build()
         val req = Request.Builder()
-            .url("http://${desktop.activeHost}:${desktop.port}/api/mobile/v1/approvals/decide")
+            .url(url)
             .header("Authorization", "Bearer ${desktop.deviceToken}")
-            .post(body.toRequestBody(jsonMedia))
+            .post(body)
             .build()
         client.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) throw DesktopBridgeException("审批提交失败（HTTP ${resp.code}）")
+            if (resp.code == 401) throw DesktopBridgeException("授权已失效", unauthorized = true)
+            if (!resp.isSuccessful) throw DesktopBridgeException("$failure（HTTP ${resp.code}）")
         }
     }
 
