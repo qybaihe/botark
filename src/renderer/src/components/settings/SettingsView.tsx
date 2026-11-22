@@ -46,6 +46,7 @@ import { useT, t } from '@/lib/i18n'
 import { platformIcon } from '@/lib/platformIcons'
 import { HermesAccountsSettingsPanel } from '@/components/hermes/HermesAccountsSettingsPanel'
 import { MobileSyncSettingsPanel } from '@/components/mobile-sync/MobileSyncSettingsPanel'
+import { McpSettingsSection } from '@/components/settings/McpSettingsSection'
 import { NEW_ROOM_ID } from '@/rooms/RoomView'
 import { useRooms } from '@/rooms/roomStore'
 import { useBotStore } from '@/store/botStore'
@@ -59,6 +60,8 @@ type SettingsTab =
   | 'hark-accounts'
   | 'hermes-accounts'
   | 'antigravity-accounts'
+  | 'cue-accounts'
+  | 'mcp-hub'
   | 'mobile-sync'
   | 'proxy-pool'
   | 'general'
@@ -93,7 +96,8 @@ const PLATFORM_LABELS: Record<PlatformId, string> = {
   grok: 'Grok Bot',
   hark: 'Hark Pro',
   hermes: 'Hermes',
-  antigravity: 'Antigravity'
+  antigravity: 'Antigravity',
+  cue: 'Cue (Manus)'
 }
 
 export function SettingsView() {
@@ -193,6 +197,12 @@ export function SettingsView() {
     () => allAccounts.filter((a) => a.platformId === 'antigravity'),
     [allAccounts]
   )
+  const cueAccounts = useMemo(() => allAccounts.filter((a) => a.platformId === 'cue'), [allAccounts])
+  const openCueLogin = useBotStore((s) => s.openCueLogin)
+  const importCueCredentials = useBotStore((s) => s.importCueCredentials)
+  const syncCueAccountBots = useBotStore((s) => s.syncCueAccountBots)
+  const [cueCredentialInput, setCueCredentialInput] = useState('')
+  const [cueTargetAccountId, setCueTargetAccountId] = useState('__new__')
 
   const onlineAccountsCount = useMemo(
     () => allAccounts.filter((a) => a.status === 'online' || a.status === 'busy' || a.status === 'attention').length,
@@ -390,11 +400,6 @@ export function SettingsView() {
   }
 
   const handleQuickAddGrokAccount = (openInBrowser = false) => {
-    const offlineExisting = grokAccounts.find((a) => a.status === 'offline' || a.status === 'error')
-    if (offlineExisting) {
-      void openGrokLogin(offlineExisting.id, openInBrowser)
-      return
-    }
     const accountId = createId('acc')
     const botId = createId('bot')
     addBot({
@@ -723,6 +728,14 @@ export function SettingsView() {
       platformId: 'antigravity',
       count: antigravityAccounts.length
     },
+    {
+      id: 'cue-accounts',
+      label: 'Cue (Manus)',
+      icon: Sparkles,
+      platformId: 'cue',
+      count: cueAccounts.length
+    },
+    { id: 'mcp-hub', label: 'MCP 与工作区', icon: Server },
     { id: 'mobile-sync', label: '手机同步', icon: Smartphone },
     { id: 'proxy-pool', label: '代理池', icon: Server, count: pool.length },
     { id: 'general', label: '常规与安全', icon: Settings }
@@ -2385,6 +2398,203 @@ export function SettingsView() {
                     </div>
                   </div>
                 </div>
+              </div>
+            )}
+            {settingsTab === 'cue-accounts' && (
+              <div className="flex flex-col gap-5 animate-veil-in">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h2 className="text-[17px] font-semibold tracking-tight text-ink">Cue (Manus) 多账号管理</h2>
+                    <p className="mt-1 text-[13px] text-ink-secondary">
+                      支持同时接入多个 Cue 账号（独立浏览器分区、独立设备指纹与代理隔离），并支持将两个或多个 Cue 账号同时编排进同一群聊协同工作。
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={() => {
+                        const accountId = createId('acc')
+                        const botId = createId('bot')
+                        addBot({
+                          id: botId,
+                          platformId: 'cue',
+                          name: `Cue ${cueAccounts.length + 1}`,
+                          accounts: [{ key: accountId, accountId, displayName: `Cue ${cueAccounts.length + 1}`, handle: '' }],
+                          background: true
+                        })
+                        void openCueLogin(accountId, false)
+                      }}
+                    >
+                      <Plus className="size-3.5" /> 登录窗口添加账号
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => {
+                        const accountId = createId('acc')
+                        const botId = createId('bot')
+                        addBot({
+                          id: botId,
+                          platformId: 'cue',
+                          name: `Cue ${cueAccounts.length + 1}`,
+                          accounts: [{ key: accountId, accountId, displayName: `Cue ${cueAccounts.length + 1}`, handle: '' }],
+                          background: true
+                        })
+                        void openCueLogin(accountId, true)
+                      }}
+                    >
+                      <Globe className="size-3.5" /> 默认浏览器授权
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-line bg-surface p-4 shadow-soft">
+                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-[13px] font-medium text-ink">粘贴凭据导入（Manus API Key / Bearer Token / Cookie / JSON）</span>
+                    <Select
+                      size="xs"
+                      variant="pill"
+                      value={cueTargetAccountId}
+                      onValueChange={(next) => setCueTargetAccountId(next)}
+                      className="max-w-64"
+                      options={[
+                        { value: '__new__', label: '+ 接入新 Cue 账号（自动创建协同 Bot）' },
+                        ...cueAccounts.map((acc) => ({
+                          value: acc.id,
+                          label: `更新凭据：${acc.handle || acc.displayName || acc.id}`
+                        }))
+                      ]}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    <textarea
+                      value={cueCredentialInput}
+                      onChange={(e) => setCueCredentialInput(e.target.value)}
+                      placeholder="粘贴 x-manus-api-key (sk-manus-...)、Bearer Token、Cookie (session_id=... / cue_session=...) 或 JSON…"
+                      rows={2}
+                      spellCheck={false}
+                      className="block w-full resize-none rounded-xl border border-line bg-canvas p-2.5 font-mono text-[12px] leading-5 text-ink outline-none placeholder:text-ink-muted focus:border-accent-600"
+                    />
+                    <div className="flex justify-end">
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        disabled={busy || !cueCredentialInput.trim()}
+                        onClick={async () => {
+                          setBusy(true)
+                          setError(undefined)
+                          setHint(undefined)
+                          try {
+                            const isNew = cueTargetAccountId === '__new__' || !accounts[cueTargetAccountId]
+                            const targetId = isNew ? createId('acc') : cueTargetAccountId
+                            await importCueCredentials(targetId, cueCredentialInput.trim())
+                            setCueCredentialInput('')
+                            setCueTargetAccountId('__new__')
+                            setHint(isNew ? '已接入新 Cue 账号并同步 Bot 到左侧列表' : '已更新 Cue 账号凭据')
+                          } catch (err) {
+                            setError(err instanceof Error ? err.message : String(err))
+                          } finally {
+                            setBusy(false)
+                          }
+                        }}
+                      >
+                        {busy ? '导入中…' : cueTargetAccountId === '__new__' ? '导入并同步 Bot' : '更新凭据'}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+
+                {cueAccounts.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-line py-10 text-center">
+                    <p className="text-[14px] font-medium text-ink">暂无 Cue 账号</p>
+                    <p className="max-w-md text-[12.5px] text-ink-muted">
+                      可添加两个或多个 Cue 账号，每个账号拥有独立凭据金库与名称，可直接拉入同一群聊协作。
+                    </p>
+                  </div>
+                ) : (
+                  <div className="overflow-hidden rounded-2xl border border-line bg-surface shadow-soft">
+                    <ul className="divide-y divide-line">
+                      {cueAccounts.map((acc) => {
+                        const accountBots = bots.filter(
+                          (b) => b.platformId === 'cue' && b.accountIds.includes(acc.id)
+                        )
+                        const ownerBot = accountBots[0]
+                        return (
+                          <li key={acc.id} className="flex flex-col gap-2.5 px-4 py-3.5 hover:bg-hover/30">
+                            <div className="flex flex-wrap items-center justify-between gap-3">
+                              <div className="flex min-w-0 items-center gap-3">
+                                <BotAvatar
+                                  seed={ownerBot?.id ?? acc.id}
+                                  platformId="cue"
+                                  status={acc.status}
+                                  size="md"
+                                />
+                                <div className="min-w-0">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <span className="truncate text-[14px] font-medium text-ink">
+                                      {acc.handle || acc.displayName || 'Cue 账号'}
+                                    </span>
+                                    <StatusBadge status={acc.status} />
+                                    <span className="rounded-md bg-sunken px-1.5 py-0.5 text-[11px] text-ink-secondary">
+                                      {accountBots.length} 个 Bot
+                                    </span>
+                                  </div>
+                                  {acc.statusDetail && (
+                                    <p className="mt-0.5 truncate text-[11.5px] text-ink-muted">
+                                      {acc.statusDetail}
+                                    </p>
+                                  )}
+                                </div>
+                              </div>
+                              <div className="flex shrink-0 items-center gap-1.5">
+                                <Button
+                                  size="sm"
+                                  variant="primary"
+                                  disabled={acc.pending}
+                                  onClick={() => void openCueLogin(acc.id, false)}
+                                >
+                                  登录窗口
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="secondary"
+                                  disabled={acc.pending}
+                                  onClick={() => void openCueLogin(acc.id, true)}
+                                >
+                                  浏览器授权
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  disabled={acc.pending || busy}
+                                  onClick={() => void syncCueAccountBots(acc.id)}
+                                >
+                                  同步 Bot
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  disabled={acc.pending}
+                                  onClick={() => void signOutAccount(acc.id)}
+                                  title="退出登录"
+                                >
+                                  <LogOut className="size-3.5" />
+                                </Button>
+                              </div>
+                            </div>
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {settingsTab === 'mcp-hub' && (
+              <div className="flex flex-col gap-5 animate-veil-in">
+                <McpSettingsSection />
               </div>
             )}
           </div>

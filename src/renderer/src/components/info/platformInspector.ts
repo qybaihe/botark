@@ -95,6 +95,18 @@ export const PLATFORM_INSPECTORS: Record<PlatformId, PlatformInspectorSpec> = {
       { id: 'computer', label: 'Environments' },
       { id: 'members', label: 'Agents' }
     ]
+  },
+  cue: {
+    platformId: 'cue',
+    displayName: 'Cue',
+    protocolLabel: 'Connect-RPC · Manus Cloud',
+    supportsWebSession: true,
+    supportsQuickNewConversation: true,
+    tabs: [
+      { id: 'overview', label: 'Overview' },
+      { id: 'computer', label: 'Computer' },
+      { id: 'members', label: 'Agents' }
+    ]
   }
 }
 

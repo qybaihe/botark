@@ -1,6 +1,6 @@
 import type { HermesApprovalView, MuseMediaPartView, MuseToolCallView } from './ipc'
 
-export type MobilePlatformId = 'meta-muse' | 'grok' | 'hark' | 'dot' | 'hermes' | 'antigravity'
+export type MobilePlatformId = 'meta-muse' | 'grok' | 'hark' | 'dot' | 'hermes' | 'antigravity' | 'cue'
 export type MobileConnectionStatus = 'online' | 'busy' | 'attention' | 'offline' | 'error'
 
 export const MOBILE_SYNC_CHANNELS = {

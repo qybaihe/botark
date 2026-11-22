@@ -8,8 +8,15 @@
  */
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
-import { app, BrowserWindow, safeStorage } from 'electron'
+import * as electronMod from 'electron'
+import { app, BrowserWindow, safeStorage, type WebContents } from 'electron'
 import { createMutex } from '@shared/proxyPool'
+import {
+  buildGoogleFallbackBannerScript,
+  GOOGLE_BLOCK_CHECK_SCRIPT,
+  installGoogleOAuthHeaderGuard,
+  isGoogleBlockedOrPasskeyText
+} from '../googleOAuthUaGuard'
 import { readJsonFile, writeJsonAtomic } from '../jsonFile'
 import { applyProxyToPartition, loadAccountProxyUrl } from '../muse/accountProxy'
 import { proxyFetch } from '../proxyTransport'
@@ -785,6 +792,8 @@ export async function runSandLogin(
   const { verifier, challenge, uuid } = createPkce()
   const url = sandLoginUrl(challenge, uuid)
   const partition = partitionForAccount(accountId)
+  const ses = (electronMod as typeof import('electron')).session?.fromPartition?.(partition)
+  installGoogleOAuthHeaderGuard(ses)
 
   const win = new BrowserWindow({
     width: 980,
@@ -804,9 +813,116 @@ export async function runSandLogin(
   })
   sandLoginWindows.set(accountId, win)
 
+  const childPopups = new Set<BrowserWindow>()
+  const closeChildPopups = () => {
+    for (const child of childPopups) {
+      try {
+        if (!child.isDestroyed()) child.close()
+      } catch {
+        /* ignore */
+      }
+    }
+    childPopups.clear()
+  }
+
   let closed = false
+  let handedOffToBrowser = false
+  const deepLinkScheme = /^(sand|grokbot|cursor):/i
+
+  const guardDeepLinks = (wc: WebContents) => {
+    const intercept = (event: Electron.Event, targetUrl: string) => {
+      if (deepLinkScheme.test(targetUrl)) {
+        event.preventDefault()
+      }
+    }
+    wc.on('will-navigate', intercept)
+    wc.on('will-redirect', intercept)
+  }
+
+  const maybeFallbackOnGoogleBlock = async (
+    wc: WebContents,
+    childWin?: BrowserWindow
+  ): Promise<void> => {
+    if (closed || handedOffToBrowser || wc.isDestroyed()) return
+    try {
+      const currentUrl = wc.getURL()
+      const bodyText = (await wc.executeJavaScript(GOOGLE_BLOCK_CHECK_SCRIPT, true)) as string
+      if (!isGoogleBlockedOrPasskeyText(bodyText, currentUrl)) return
+      if (!handedOffToBrowser && !closed) {
+        handedOffToBrowser = true
+        const openExternal = (electronMod as typeof import('electron')).shell?.openExternal
+        if (typeof openExternal === 'function') {
+          void openExternal(url)
+        }
+        opts.onNeedsInput?.('已自动在系统浏览器打开授权页，请完成登录后返回…')
+        if (childWin && !childWin.isDestroyed()) {
+          try {
+            childWin.close()
+          } catch {
+            /* ignore */
+          }
+        }
+        if (!win.isDestroyed()) {
+          void win.webContents
+            .executeJavaScript(
+              buildGoogleFallbackBannerScript({
+                title: '已自动切换至系统默认浏览器完成 Google 授权',
+                detail: '请在系统浏览器中完成登录并确认授权，完成后 BotArk 将自动完成同步。'
+              }),
+              true
+            )
+            .catch(() => undefined)
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  guardDeepLinks(win.webContents)
+
+  win.webContents.setWindowOpenHandler(({ url: popupUrl }) => {
+    if (deepLinkScheme.test(popupUrl)) {
+      return { action: 'deny' }
+    }
+    if (popupUrl === 'about:blank' || /^https?:\/\//i.test(popupUrl)) {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          width: 520,
+          height: 680,
+          title: '安全授权',
+          parent: win.isDestroyed() ? undefined : win,
+          autoHideMenuBar: true,
+          webPreferences: {
+            partition,
+            sandbox: true,
+            contextIsolation: true,
+            nodeIntegration: false
+          }
+        }
+      }
+    }
+    return { action: 'deny' }
+  })
+
+  win.webContents.on('did-create-window', (childWin) => {
+    childPopups.add(childWin)
+    guardDeepLinks(childWin.webContents)
+    const onChildNav = () => {
+      void maybeFallbackOnGoogleBlock(childWin.webContents, childWin)
+    }
+    childWin.webContents.on('did-finish-load', onChildNav)
+    childWin.webContents.on('did-navigate', onChildNav)
+    childWin.webContents.on('did-redirect-navigation', onChildNav)
+    childWin.on('closed', () => {
+      childPopups.delete(childWin)
+    })
+  })
+
   win.on('closed', () => {
     closed = true
+    closeChildPopups()
     sandLoginWindows.delete(accountId)
   })
 
@@ -837,7 +953,16 @@ export async function runSandLogin(
     }
   }
 
-  win.webContents.on('did-finish-load', () => void tryConfirmClick())
+  win.webContents.on('did-finish-load', () => {
+    void tryConfirmClick()
+    void maybeFallbackOnGoogleBlock(win.webContents)
+  })
+  win.webContents.on('did-navigate', () => {
+    void maybeFallbackOnGoogleBlock(win.webContents)
+  })
+  win.webContents.on('did-redirect-navigation', () => {
+    void maybeFallbackOnGoogleBlock(win.webContents)
+  })
   const confirmTimers = [1200, 2500, 4000, 6500].map((ms) => setTimeout(() => void tryConfirmClick(), ms))
 
   try {
@@ -854,6 +979,7 @@ export async function runSandLogin(
     return { tokens, clickedConfirm }
   } finally {
     confirmTimers.forEach(clearTimeout)
+    closeChildPopups()
     if (!win.isDestroyed()) win.close()
   }
 }

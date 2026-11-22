@@ -11,7 +11,7 @@
  */
 
 /** Platforms BotArk knows about. Add an id here and to `platforms.ts`. */
-export type PlatformId = 'meta-muse' | 'grok' | 'hark' | 'dot' | 'hermes' | 'antigravity'
+export type PlatformId = 'meta-muse' | 'grok' | 'hark' | 'dot' | 'hermes' | 'antigravity' | 'cue'
 
 /** Connection state of a single platform account. */
 export type ConnectionStatus = 'online' | 'busy' | 'attention' | 'offline' | 'error'
@@ -70,6 +70,8 @@ export interface OutgoingMessage {
    * would post the message twice.
    */
   onAccepted?: () => void
+  /** Optional abort signal (e.g. Collaboration Room Stop) to cancel waiting for the turn. */
+  signal?: AbortSignal
 }
 
 export interface SendReceipt {

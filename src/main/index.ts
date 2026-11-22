@@ -16,6 +16,8 @@ import { registerHermesIpc } from './hermes/hermesIpc'
 import { cancelAllHermesRuns } from './hermes/hermesClient'
 import { registerAntigravityIpc } from './antigravity/antigravityIpc'
 import { cancelAllAntigravityRuns } from './antigravity/antigravityClient'
+import { registerCueIpc } from './cue/cueIpc'
+import { stopCueAccountWatch } from './cue/cueWatchManager'
 import { registerMobileSyncIpc, stopMobileSyncServer } from './mobileSync/mobileSyncIpc'
 import { applyAllStoredProxies } from './muse/accountProxy'
 import { closeAllLocalProxyBridges } from './localProxyBridge'
@@ -161,6 +163,7 @@ app.on('before-quit', () => {
   cancelHarkWatch('*')
   cancelAllHermesRuns('*')
   cancelAllAntigravityRuns('*')
+  stopCueAccountWatch('*')
   void stopMobileSyncServer()
   disposeAllMuseManagers()
   void closeAllLocalProxyBridges()
@@ -179,6 +182,7 @@ app.whenReady().then(async () => {
   registerDotIpc()
   registerHermesIpc()
   registerAntigravityIpc()
+  registerCueIpc()
   registerMobileSyncIpc()
   registerVaultIpc()
   registerWorkspaceIpc(() => mainWindow)

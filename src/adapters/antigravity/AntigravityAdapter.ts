@@ -29,6 +29,18 @@ export class AntigravityAdapter implements PlatformAdapter {
   private readonly accounts = new Map<string, PlatformAccount>()
   private readonly statuses = new Map<string, ConnectionStatus>()
   private readonly listeners = new Set<AdapterListener>()
+  private readonly pendingTurns = new Map<
+    string,
+    {
+      conversationId: string
+      serverMessageId?: string
+      needsApproval?: boolean
+      settled: boolean
+      resolve: (outcome: { hasReply: boolean; sessionId?: string }) => void
+      reject: (error: unknown) => void
+      cleanupAbort?: () => void
+    }
+  >()
   private bridgeUnsub: Unsubscribe | null = null
 
   constructor() {
@@ -55,15 +67,29 @@ export class AntigravityAdapter implements PlatformAdapter {
           busy: event.busy
         }
       })
+      const pending = this.pendingTurns.get(event.accountId)
       if (event.activityCode === 'needs_approval') {
+        if (pending && !pending.settled) pending.needsApproval = true
         this.setStatus(event.accountId, 'attention', event.activityText ?? undefined)
+      } else if (event.busy) {
+        if (this.getStatus(event.accountId) === 'offline') {
+          this.setStatus(event.accountId, 'busy')
+        }
+      } else if (!pending || pending.settled) {
+        if (this.getStatus(event.accountId) !== 'online') {
+          this.setStatus(event.accountId, 'online')
+        }
       }
       return
     }
 
     if (event.type === 'stream') {
       const convId = event.conversationId ?? event.accountId
+      const pending = this.pendingTurns.get(event.accountId)
       if (!event.done) {
+        if (this.getStatus(event.accountId) === 'offline') {
+          this.setStatus(event.accountId, 'busy')
+        }
         this.emit({
           type: 'typing',
           conversationId: convId,
@@ -81,26 +107,40 @@ export class AntigravityAdapter implements PlatformAdapter {
           })
         }
       } else {
+        const matchesPending =
+          pending &&
+          !pending.settled &&
+          (convId === pending.conversationId ||
+            (pending.serverMessageId !== undefined && pending.serverMessageId === event.messageId))
+        const hasReply = Boolean(event.text || event.tools?.length)
+        const keepAttention =
+          Boolean(matchesPending && pending.needsApproval) ||
+          this.getStatus(event.accountId) === 'attention'
+
         this.emit({
           type: 'typing',
           conversationId: convId,
           accountId: event.accountId,
           isTyping: false
         })
-        this.emit({
-          type: 'activity',
-          accountId: event.accountId,
-          activity: {
-            code: 'idle',
-            text: null,
-            emoji: null,
-            agentId: null,
-            subagents: 0,
-            busy: false
-          }
-        })
-        this.setStatus(event.accountId, 'online')
-        if (event.text || event.tools?.length) {
+        if (!keepAttention) {
+          this.emit({
+            type: 'activity',
+            accountId: event.accountId,
+            activity: {
+              code: 'idle',
+              text: null,
+              emoji: null,
+              agentId: null,
+              subagents: 0,
+              busy: false
+            }
+          })
+          this.setStatus(event.accountId, 'online')
+        } else {
+          this.setStatus(event.accountId, 'attention')
+        }
+        if (hasReply) {
           this.emit({
             type: 'message',
             message: {
@@ -112,6 +152,12 @@ export class AntigravityAdapter implements PlatformAdapter {
               tools: event.tools
             }
           })
+        }
+        if (matchesPending) {
+          pending.settled = true
+          this.pendingTurns.delete(event.accountId)
+          pending.cleanupAbort?.()
+          pending.resolve({ hasReply, sessionId: event.sessionId })
         }
       }
       return
@@ -137,6 +183,7 @@ export class AntigravityAdapter implements PlatformAdapter {
       return
     }
 
+    this.rejectPendingTurn(event.accountId, new AdapterError('not-connected', 'Signed out'))
     this.emit({
       type: 'login',
       accountId: event.accountId,
@@ -144,6 +191,21 @@ export class AntigravityAdapter implements PlatformAdapter {
       windowClosed: event.windowClosed
     })
     this.setStatus(event.accountId, 'offline')
+  }
+
+  private rejectPendingTurn(accountId: string, error: unknown): void {
+    const pending = this.pendingTurns.get(accountId)
+    if (!pending || pending.settled) return
+    pending.settled = true
+    this.pendingTurns.delete(accountId)
+    pending.cleanupAbort?.()
+    this.emit({
+      type: 'typing',
+      conversationId: pending.conversationId,
+      accountId,
+      isTyping: false
+    })
+    pending.reject(error)
   }
 
   private emit(event: AdapterEvent): void {
@@ -199,6 +261,7 @@ export class AntigravityAdapter implements PlatformAdapter {
   }
 
   async disconnect(accountId: string): Promise<void> {
+    this.rejectPendingTurn(accountId, new AdapterError('not-connected', 'Disconnected'))
     const bridge = getBotHubBridge()?.antigravity
     await bridge?.cancelRun(accountId).catch(() => undefined)
     this.setStatus(accountId, 'offline')
@@ -226,6 +289,7 @@ export class AntigravityAdapter implements PlatformAdapter {
   }
 
   async cancelLogin(accountId: string): Promise<void> {
+    this.rejectPendingTurn(accountId, new AdapterError('not-connected', 'Login cancelled'))
     const bridge = getBotHubBridge()?.antigravity
     await bridge?.cancelLogin(accountId).catch(() => undefined)
     this.accounts.delete(accountId)
@@ -238,8 +302,70 @@ export class AntigravityAdapter implements PlatformAdapter {
     if (!bridge) {
       throw new AdapterError('not-connected', 'Antigravity IPC unavailable')
     }
+    if (message.signal?.aborted) {
+      throw new AdapterError('network', 'Aborted')
+    }
+
+    this.rejectPendingTurn(message.accountId, new AdapterError('network', 'Superseded by new message'))
 
     const clientMessageId = createId('agy_msg')
+    let resolveTurn!: (outcome: { hasReply: boolean; sessionId?: string }) => void
+    let rejectTurn!: (error: unknown) => void
+    const turnPromise = new Promise<{ hasReply: boolean; sessionId?: string }>((resolve, reject) => {
+      resolveTurn = resolve
+      rejectTurn = reject
+    })
+    const pendingTurn: {
+      conversationId: string
+      serverMessageId?: string
+      needsApproval?: boolean
+      settled: boolean
+      resolve: (outcome: { hasReply: boolean; sessionId?: string }) => void
+      reject: (error: unknown) => void
+      cleanupAbort?: () => void
+    } = {
+      conversationId: message.conversationId,
+      settled: false,
+      resolve: resolveTurn,
+      reject: rejectTurn
+    }
+    this.pendingTurns.set(message.accountId, pendingTurn)
+
+    const onAbort = () => {
+      if (pendingTurn.settled) return
+      pendingTurn.settled = true
+      if (this.pendingTurns.get(message.accountId) === pendingTurn) {
+        this.pendingTurns.delete(message.accountId)
+      }
+      pendingTurn.cleanupAbort?.()
+      void bridge.cancelRun(message.accountId).catch(() => undefined)
+      this.emit({
+        type: 'typing',
+        conversationId: message.conversationId,
+        accountId: message.accountId,
+        isTyping: false
+      })
+      this.emit({
+        type: 'activity',
+        accountId: message.accountId,
+        activity: {
+          code: 'idle',
+          text: null,
+          emoji: null,
+          agentId: null,
+          subagents: 0,
+          busy: false
+        }
+      })
+      this.setStatus(message.accountId, 'online')
+      pendingTurn.reject(new AdapterError('network', 'Aborted'))
+    }
+
+    if (message.signal) {
+      message.signal.addEventListener('abort', onAbort, { once: true })
+      pendingTurn.cleanupAbort = () => message.signal?.removeEventListener('abort', onAbort)
+    }
+
     this.setStatus(message.accountId, 'busy')
     try {
       const res = await bridge.sendMessage({
@@ -249,7 +375,21 @@ export class AntigravityAdapter implements PlatformAdapter {
         text: message.text,
         clientMessageId
       })
+      if (pendingTurn.settled) {
+        const outcome = await turnPromise
+        return {
+          messageId: clientMessageId,
+          acceptedAt: Date.now(),
+          sessionId: res.ok ? res.cascadeId : outcome.sessionId,
+          ...(outcome.hasReply ? {} : { noReply: true })
+        }
+      }
       if (!res.ok) {
+        pendingTurn.settled = true
+        if (this.pendingTurns.get(message.accountId) === pendingTurn) {
+          this.pendingTurns.delete(message.accountId)
+        }
+        pendingTurn.cleanupAbort?.()
         const err = new AdapterError(
           res.status === 401 || res.status === 403 ? 'not-connected' : 'network',
           res.message || `Antigravity send failed (${res.status})`
@@ -258,13 +398,30 @@ export class AntigravityAdapter implements PlatformAdapter {
         this.setStatus(message.accountId, nextStatus, err.message)
         throw err
       }
+      pendingTurn.serverMessageId = res.messageId
       message.onAccepted?.()
+      if (message.signal?.aborted) {
+        onAbort()
+      }
+      const outcome = await turnPromise
       return {
         messageId: clientMessageId,
         acceptedAt: Date.now(),
-        sessionId: res.cascadeId
+        sessionId: res.cascadeId || outcome.sessionId,
+        ...(outcome.hasReply ? {} : { noReply: true })
       }
     } catch (error) {
+      if (!pendingTurn.settled) {
+        pendingTurn.settled = true
+        if (this.pendingTurns.get(message.accountId) === pendingTurn) {
+          this.pendingTurns.delete(message.accountId)
+        }
+        pendingTurn.cleanupAbort?.()
+      }
+      if (message.signal?.aborted) {
+        this.setStatus(message.accountId, 'online')
+        throw error instanceof AdapterError ? error : new AdapterError('network', 'Aborted')
+      }
       const err =
         error instanceof AdapterError
           ? error

@@ -56,6 +56,13 @@ import type {
   AntigravityRpcResponse,
   AntigravitySendRequest,
   AntigravitySendResponse,
+  CueAuthSessionPayload,
+  CueAuthStatus,
+  CueImportCredentialsRequest,
+  CueMainEvent,
+  CueOpenLoginRequest,
+  CueRpcRequest,
+  CueRpcResponse,
   SecurityVaultStatus,
   VaultStatusRequest
 } from './ipc'
@@ -227,6 +234,17 @@ export interface AntigravityBridge {
   onEvent(listener: (event: AntigravityMainEvent) => void): () => void
 }
 
+export interface CueBridge {
+  openLogin(request: CueOpenLoginRequest): Promise<CueAuthStatus>
+  cancelLogin(accountId: string): Promise<CueAuthStatus>
+  importCredentials(request: CueImportCredentialsRequest): Promise<CueAuthStatus>
+  clearAuth(accountId: string): Promise<CueAuthStatus>
+  authStatus(accountId: string): Promise<CueAuthStatus>
+  getSession(accountId: string): Promise<CueAuthSessionPayload>
+  rpc(request: CueRpcRequest): Promise<CueRpcResponse>
+  onEvent(listener: (event: CueMainEvent) => void): () => void
+}
+
 export interface MobileSyncBridge {
   getState(): Promise<MobileSyncStateView>
   start(): Promise<MobileSyncStateView>
@@ -270,6 +288,7 @@ export interface BotHubBridge {
   readonly dot: DotBridge
   readonly hermes: HermesBridge
   readonly antigravity: AntigravityBridge
+  readonly cue?: CueBridge
   readonly mobileSync?: MobileSyncBridge
   readonly slack?: SlackBridge
   readonly workspace?: WorkspaceBridge

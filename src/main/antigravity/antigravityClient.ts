@@ -474,6 +474,7 @@ async function streamCascadeUntilDone(opts: {
   let lastActivity = ''
   let sawRunning = false
   let finished = false
+  let needsApproval = false
 
   const emitProgress = (done: boolean) => {
     // Advance afterStepIndex if the new user input step appeared at index > initial afterStepIndex
@@ -514,13 +515,15 @@ async function streamCascadeUntilDone(opts: {
       return
     }
 
-    onEvent({
-      type: 'activity',
-      accountId,
-      activityCode: 'idle',
-      activityText: null,
-      busy: false
-    })
+    if (!needsApproval) {
+      onEvent({
+        type: 'activity',
+        accountId,
+        activityCode: 'idle',
+        activityText: null,
+        busy: false
+      })
+    }
     onEvent({
       type: 'stream',
       accountId,
@@ -550,6 +553,7 @@ async function streamCascadeUntilDone(opts: {
     const isIdle = update.fullyIdle || update.runStatus === CASCADE_RUN_STATUS.IDLE
     const hasWaiting = update.waitingStepIndices.length > 0
     if (hasWaiting) {
+      needsApproval = true
       onEvent({
         type: 'activity',
         accountId,
@@ -646,6 +650,15 @@ async function streamCascadeUntilDone(opts: {
       activityCode: 'idle',
       activityText: null,
       busy: false
+    })
+    onEvent({
+      type: 'stream',
+      accountId,
+      conversationId,
+      sessionId: cascadeId,
+      messageId: replyMessageId,
+      text: '',
+      done: true
     })
   }
 }

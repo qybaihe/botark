@@ -206,6 +206,12 @@ async function resolveDotProxyUrl(
   return getStoredDotAccount(accountId)?.proxyUrl
 }
 
+const activeTurnBotIds = new Map<string, string>()
+
+export function isEphemeralRoomTurnBotId(botId?: string): boolean {
+  return Boolean(botId && botId.startsWith('room-turn-'))
+}
+
 function ensureStoreLoaded(): void {
   if (storeLoaded && accountStore.size > 0) return
   storeLoaded = true
@@ -253,8 +259,11 @@ function ensureStoreLoaded(): void {
         }
         if (accessToken) {
           const { encTokens: _enc, ...rest } = v
+          const cleanBotId = isEphemeralRoomTurnBotId(rest.botId) ? undefined : rest.botId
+          if (cleanBotId !== rest.botId) migratedPlaintext = true
           accountStore.set(k, {
             ...rest,
+            botId: cleanBotId,
             accessToken,
             ...(refreshToken ? { refreshToken } : {})
           })
@@ -388,9 +397,13 @@ export function patchStoredDotAccount(
   ensureStoreLoaded()
   const prev = accountStore.get(accountId)
   if (!prev) return undefined
+  const sanitizedPatch = { ...patch }
+  if ('botId' in sanitizedPatch && isEphemeralRoomTurnBotId(sanitizedPatch.botId)) {
+    delete sanitizedPatch.botId
+  }
   const next: DotStoredAccount = {
     ...prev,
-    ...patch,
+    ...sanitizedPatch,
     accountId,
     updatedAtMs: Date.now()
   }
@@ -435,6 +448,8 @@ export function upsertDotCredentials(
     displayName?: string
     planType?: string
     proxyUrl?: string
+    botId?: string
+    mode?: 'dot' | 'native'
   }
 ): DotStoredAccount {
   ensureStoreLoaded()
@@ -469,8 +484,11 @@ export function upsertDotCredentials(
     activeDotId: prev?.activeDotId,
     roomId: prev?.roomId,
     threadId: prev?.threadId,
-    botId: prev?.botId,
-    mode: 'dot',
+    botId:
+      input.botId && !isEphemeralRoomTurnBotId(input.botId)
+        ? input.botId
+        : prev?.botId,
+    mode: input.mode ?? prev?.mode ?? 'dot',
     model: prev?.model ?? 'gpt-6-astra',
     effort: prev?.effort ?? 'medium',
     updatedAtMs: Date.now()
@@ -697,6 +715,11 @@ export async function importDotCredentialsFromRaw(
     (typeof accObj['planType'] === 'string' ? accObj['planType'] : undefined)
   const proxyUrl =
     extra?.proxyUrl || (typeof rec['proxy_url'] === 'string' ? rec['proxy_url'] : undefined)
+  const botId =
+    typeof rec['botId'] === 'string' && !isEphemeralRoomTurnBotId(rec['botId'])
+      ? rec['botId']
+      : undefined
+  const mode = rec['mode'] === 'native' || rec['mode'] === 'dot' ? rec['mode'] : undefined
 
   return upsertDotCredentials(accountId, {
     accessToken,
@@ -706,7 +729,9 @@ export async function importDotCredentialsFromRaw(
     email,
     displayName,
     planType,
-    proxyUrl
+    proxyUrl,
+    botId,
+    mode
   })
 }
 
@@ -1834,7 +1859,7 @@ export function ensureRoomPoller(
           emitRealtime({
             type: 'message',
             accountId,
-            botId: curAcc.botId,
+            botId: activeTurnBotIds.get(accountId) ?? curAcc.botId,
             dotId: curAcc.activeDotId,
             roomId: cur.roomId,
             message: m,
@@ -1878,7 +1903,7 @@ export function handleCalpicoEventPayload(
       emitRealtime({
         type: 'message',
         accountId,
-        botId: acc?.botId,
+        botId: activeTurnBotIds.get(accountId) ?? acc?.botId,
         dotId: acc?.activeDotId,
         roomId: msg.roomId,
         message: msg,
@@ -1891,7 +1916,7 @@ export function handleCalpicoEventPayload(
     emitRealtime({
       type: 'activity',
       accountId,
-      botId: acc?.botId,
+      botId: activeTurnBotIds.get(accountId) ?? acc?.botId,
       dotId: acc?.activeDotId,
       roomId: evRoomId || acc?.roomId || '',
       code: typing ? 'thinking' : 'idle',
@@ -1908,7 +1933,7 @@ export function handleCalpicoEventPayload(
       emitRealtime({
         type: 'activity',
         accountId,
-        botId: acc?.botId,
+        botId: activeTurnBotIds.get(accountId) ?? acc?.botId,
         dotId: acc?.activeDotId,
         roomId: evRoomId || acc?.roomId || '',
         code: 'idle',
@@ -1932,7 +1957,7 @@ export function handleCalpicoEventPayload(
     emitRealtime({
       type: 'activity',
       accountId,
-      botId: acc?.botId,
+      botId: activeTurnBotIds.get(accountId) ?? acc?.botId,
       dotId: acc?.activeDotId,
       roomId: evRoomId || acc?.roomId || '',
       code: busy ? statusType.toLowerCase() || 'thinking' : 'idle',
@@ -2153,27 +2178,40 @@ export async function sendAndWatchDotRoomReply(
   sentMessage: DotRoomMessage
   replies: DotRoomMessage[]
 }> {
-  if (opts.botId) {
+  const ephemeralBotId = isEphemeralRoomTurnBotId(opts.botId) ? opts.botId! : undefined
+  if (opts.botId && !ephemeralBotId) {
     patchStoredDotAccount(accountId, { botId: opts.botId })
   }
 
-  const beforeSnap = await listRoomMessages(accountId, {
-    roomId: opts.roomId,
-    dotId: opts.dotId,
-    limit: 32
-  }).catch(() => ({ roomId: opts.roomId || '', messages: [] as DotRoomMessage[] }))
-  const beforeIds = new Set(beforeSnap.messages.map((m) => m.id))
-
-  if (beforeSnap.roomId) {
-    await ensureCelsiusWatcher(accountId, beforeSnap.roomId).catch(() => undefined)
+  let beforeSnap: { roomId: string; messages: DotRoomMessage[] }
+  let sent: { roomId: string; message: DotRoomMessage }
+  if (ephemeralBotId) {
+    activeTurnBotIds.set(accountId, ephemeralBotId)
   }
+  try {
+    beforeSnap = await listRoomMessages(accountId, {
+      roomId: opts.roomId,
+      dotId: opts.dotId,
+      limit: 32
+    }).catch(() => ({ roomId: opts.roomId || '', messages: [] as DotRoomMessage[] }))
 
-  const sent = await sendRoomMessage(accountId, {
-    roomId: opts.roomId || beforeSnap.roomId || undefined,
-    dotId: opts.dotId,
-    text: opts.text,
-    attachments: opts.attachments
-  })
+    if (beforeSnap.roomId) {
+      await ensureCelsiusWatcher(accountId, beforeSnap.roomId).catch(() => undefined)
+    }
+
+    sent = await sendRoomMessage(accountId, {
+      roomId: opts.roomId || beforeSnap.roomId || undefined,
+      dotId: opts.dotId,
+      text: opts.text,
+      attachments: opts.attachments
+    })
+  } catch (err) {
+    if (ephemeralBotId && activeTurnBotIds.get(accountId) === ephemeralBotId) {
+      activeTurnBotIds.delete(accountId)
+    }
+    throw err
+  }
+  const beforeIds = new Set(beforeSnap.messages.map((m) => m.id))
   opts.onSent?.()
   const roomId = sent.roomId
   const sentId = sent.message.id
@@ -2200,6 +2238,9 @@ export async function sendAndWatchDotRoomReply(
     const finish = () => {
       if (finished) return
       finished = true
+      if (ephemeralBotId && activeTurnBotIds.get(accountId) === ephemeralBotId) {
+        activeTurnBotIds.delete(accountId)
+      }
       if (activeRoomWatches.get(accountId) === finish) {
         activeRoomWatches.delete(accountId)
       }
@@ -2391,14 +2432,15 @@ interface ActiveNativeSession {
   ws: WebSocket
   threadId?: string
   turnId?: string
+  abort?: () => void
 }
 
 const activeNativeSessions = new Map<string, ActiveNativeSession>()
 
 export async function interruptNativeTurn(accountId: string): Promise<void> {
   const active = activeNativeSessions.get(accountId)
-  if (!active || active.ws.readyState !== WebSocket.OPEN) return
-  if (active.threadId && active.turnId) {
+  if (!active) return
+  if (active.ws.readyState === WebSocket.OPEN && active.threadId && active.turnId) {
     try {
       active.ws.send(
         JSON.stringify({
@@ -2412,6 +2454,7 @@ export async function interruptNativeTurn(accountId: string): Promise<void> {
       /* ignore */
     }
   }
+  active.abort?.()
 }
 
 async function withAppServerWs<T>(
@@ -2589,8 +2632,11 @@ export async function streamDotNativeTurn(
   accountId: string,
   opts: {
     text: string
+    threadId?: string
+    signal?: AbortSignal
     model?: string
     effort?: string
+    onSent?: () => void
     onDelta?: (args: {
       messageId: string
       text: string
@@ -2601,6 +2647,9 @@ export async function streamDotNativeTurn(
     onActivity?: (code: string, text: string | undefined, busy: boolean) => void
   }
 ): Promise<{ messageId: string; text: string; threadId: string; tools: MuseToolCallView[] }> {
+  if (opts.signal?.aborted) {
+    throw new DotApiError(499, 'Aborted')
+  }
   const acc = await ensureValidDotAccount(accountId)
   const model = opts.model || acc.model || 'gpt-6-astra'
   const effort = opts.effort || acc.effort || 'medium'
@@ -2608,13 +2657,45 @@ export async function streamDotNativeTurn(
   return withAppServerWs(
     accountId,
     async ({ call, ws }) => {
+      if (opts.signal?.aborted) {
+        throw new DotApiError(499, 'Aborted')
+      }
       opts.onActivity?.('thinking', `Running ${model}…`, true)
-      const started = (await call('thread/start', {
-        model,
-        serviceTier: 'fast',
-        approvalPolicy: 'never'
-      })) as { thread?: { id?: string } }
-      const threadId = started?.thread?.id || randomUUID()
+
+      let threadId = ''
+      const requestedThreadId = opts.threadId?.trim()
+      if (requestedThreadId) {
+        try {
+          const resumed = (await call('thread/resume', {
+            threadId: requestedThreadId,
+            model,
+            serviceTier: 'fast',
+            approvalPolicy: 'never'
+          })) as { thread?: { id?: string } } | undefined
+          threadId = resumed?.thread?.id || requestedThreadId
+        } catch {
+          try {
+            const readRes = (await call('thread/read', { threadId: requestedThreadId })) as
+              | { thread?: { id?: string } }
+              | undefined
+            if (readRes?.thread?.id) {
+              threadId = readRes.thread.id
+            } else if (readRes) {
+              threadId = requestedThreadId
+            }
+          } catch {
+            /* fall back to thread/start */
+          }
+        }
+      }
+      if (!threadId) {
+        const started = (await call('thread/start', {
+          model,
+          serviceTier: 'fast',
+          approvalPolicy: 'never'
+        })) as { thread?: { id?: string } }
+        threadId = started?.thread?.id || randomUUID()
+      }
 
       const sessionState: ActiveNativeSession = { ws, threadId }
       activeNativeSessions.set(accountId, sessionState)
@@ -2622,6 +2703,12 @@ export async function streamDotNativeTurn(
       let messageId = `dot_native_${randomUUID()}`
       let fullText = ''
       const toolsMap = new Map<string, MuseToolCallView>()
+      let sentNotified = false
+      const notifySent = () => {
+        if (sentNotified) return
+        sentNotified = true
+        opts.onSent?.()
+      }
 
       return new Promise<{
         messageId: string
@@ -2629,6 +2716,28 @@ export async function streamDotNativeTurn(
         threadId: string
         tools: MuseToolCallView[]
       }>((resolve, reject) => {
+        let settled = false
+        const cleanupSession = () => {
+          ws.off('message', onMsg)
+          if (activeNativeSessions.get(accountId) === sessionState) {
+            activeNativeSessions.delete(accountId)
+          }
+          opts.signal?.removeEventListener('abort', onSignalAbort)
+        }
+        const abortTurn = () => {
+          if (settled) return
+          settled = true
+          cleanupSession()
+          opts.onActivity?.('idle', undefined, false)
+          reject(new DotApiError(499, 'Aborted'))
+        }
+        const onSignalAbort = () => {
+          void interruptNativeTurn(accountId)
+          abortTurn()
+        }
+        sessionState.abort = abortTurn
+        opts.signal?.addEventListener('abort', onSignalAbort, { once: true })
+
         const onMsg = (data: WebSocket.RawData) => {
           try {
             const frame = JSON.parse(data.toString()) as {
@@ -2639,6 +2748,7 @@ export async function streamDotNativeTurn(
             const p = frame.params ?? {}
 
             if (frame.method === 'turn/started') {
+              notifySent()
               const turn = p['turn'] as { id?: string } | undefined
               if (turn?.id) sessionState.turnId = turn.id
             } else if (frame.method === 'item/started') {
@@ -2689,8 +2799,9 @@ export async function streamDotNativeTurn(
                 toolsMap.set(itemId, { ...prev, status: 'completed' })
               }
             } else if (frame.method === 'turn/completed') {
-              ws.off('message', onMsg)
-              activeNativeSessions.delete(accountId)
+              if (settled) return
+              settled = true
+              cleanupSession()
               opts.onActivity?.('idle', undefined, false)
               opts.onDelta?.({
                 messageId,
@@ -2711,6 +2822,10 @@ export async function streamDotNativeTurn(
         }
 
         ws.on('message', onMsg)
+        if (opts.signal?.aborted) {
+          onSignalAbort()
+          return
+        }
 
         call('turn/start', {
           threadId,
@@ -2718,12 +2833,17 @@ export async function streamDotNativeTurn(
           model,
           effort,
           serviceTier: 'fast'
-        }).catch((err) => {
-          ws.off('message', onMsg)
-          activeNativeSessions.delete(accountId)
-          opts.onActivity?.('idle', undefined, false)
-          reject(err)
         })
+          .then(() => {
+            notifySent()
+          })
+          .catch((err) => {
+            if (settled) return
+            settled = true
+            cleanupSession()
+            opts.onActivity?.('idle', undefined, false)
+            reject(err)
+          })
       })
     },
     120_000

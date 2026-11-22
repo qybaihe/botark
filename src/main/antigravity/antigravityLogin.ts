@@ -7,14 +7,18 @@
  * Never prints cookie or auth-header values.
  */
 
-import { BrowserWindow, session as electronSession, shell } from 'electron'
-import { installGoogleOAuthHeaderGuard } from '../googleOAuthUaGuard'
+import { BrowserWindow, session as electronSession, shell, type WebContents } from 'electron'
+import {
+  buildGoogleFallbackBannerScript,
+  GOOGLE_BLOCK_CHECK_SCRIPT,
+  installGoogleOAuthHeaderGuard,
+  isGoogleBlockedOrPasskeyText
+} from '../googleOAuthUaGuard'
 import { applyProxyToPartition } from '../muse/accountProxy'
 import { partitionForAccount } from '../webContentsViewManager'
 import { listAntigravityCookieNames, probeAntigravitySession } from './antigravityClient'
 import {
   ANTIGRAVITY_ORIGIN,
-  cleanAntigravityChromeUserAgent,
   isAllowedAntigravityUrl
 } from './antigravityProtocol'
 
@@ -75,8 +79,6 @@ export async function openAntigravityLoginWindow(accountId: string, parent?: Bro
 
   const partition = partitionForAccount(accountId)
   const ses = electronSession.fromPartition(partition)
-  const cleanUa = cleanAntigravityChromeUserAgent(ses.getUserAgent())
-  ses.setUserAgent(cleanUa)
   installGoogleOAuthHeaderGuard(ses)
 
   // Already signed in on this partition?
@@ -111,7 +113,6 @@ export async function openAntigravityLoginWindow(accountId: string, parent?: Bro
       backgroundThrottling: false
     }
   })
-  win.webContents.setUserAgent(cleanUa)
   loginWindows.set(accountId, win)
 
   const childPopups = new Set<BrowserWindow>()
@@ -126,35 +127,48 @@ export async function openAntigravityLoginWindow(accountId: string, parent?: Bro
     childPopups.clear()
   }
 
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    if (isAllowedAntigravityUrl(url)) {
-      return {
-        action: 'allow',
-        overrideBrowserWindowOptions: {
-          width: 540,
-          height: 700,
-          title: 'Google 登录',
-          autoHideMenuBar: true,
-          parent: win.isDestroyed() ? undefined : win,
-          webPreferences: {
-            partition,
-            sandbox: true,
-            contextIsolation: true,
-            nodeIntegration: false
+  const attachNavigationGuards = (wc: WebContents, parentForChild: BrowserWindow) => {
+    wc.setWindowOpenHandler(({ url }) => {
+      if (url === 'botark-external://open') {
+        void shell.openExternal(`${ANTIGRAVITY_ORIGIN}/`)
+        return { action: 'deny' }
+      }
+      if (isAllowedAntigravityUrl(url)) {
+        return {
+          action: 'allow',
+          overrideBrowserWindowOptions: {
+            width: 540,
+            height: 700,
+            title: 'Google 登录',
+            autoHideMenuBar: true,
+            parent: parentForChild.isDestroyed() ? undefined : parentForChild,
+            webPreferences: {
+              partition,
+              sandbox: true,
+              contextIsolation: true,
+              nodeIntegration: false
+            }
           }
         }
       }
-    }
-    if (/^https?:\/\//.test(url)) void shell.openExternal(url)
-    return { action: 'deny' }
-  })
+      if (/^https?:\/\//i.test(url)) void shell.openExternal(url)
+      return { action: 'deny' }
+    })
 
-  win.webContents.on('will-navigate', (event, url) => {
-    if (!isAllowedAntigravityUrl(url) && /^https?:\/\//.test(url)) {
-      event.preventDefault()
-      void shell.openExternal(url)
-    }
-  })
+    wc.on('will-navigate', (event, url) => {
+      if (url === 'botark-external://open') {
+        event.preventDefault()
+        void shell.openExternal(`${ANTIGRAVITY_ORIGIN}/`)
+        return
+      }
+      if (!isAllowedAntigravityUrl(url) && /^https?:\/\//i.test(url)) {
+        event.preventDefault()
+        void shell.openExternal(url)
+      }
+    })
+  }
+
+  attachNavigationGuards(win.webContents, win)
 
   let settling = false
   let checking = false
@@ -186,23 +200,52 @@ export async function openAntigravityLoginWindow(accountId: string, parent?: Bro
     }
   }
 
-  const onNav = () => {
-    void finishIfSignedIn()
+  let handedOffToBrowser = false
+  const maybeShowGoogleFallbackBanner = async (wc: WebContents): Promise<void> => {
+    if (settling || wc.isDestroyed()) return
+    try {
+      const currentUrl = wc.getURL()
+      const bodyText = await wc.executeJavaScript(GOOGLE_BLOCK_CHECK_SCRIPT, true)
+      if (!isGoogleBlockedOrPasskeyText(bodyText, currentUrl)) return
+      if (!handedOffToBrowser) {
+        handedOffToBrowser = true
+        void shell.openExternal(`${ANTIGRAVITY_ORIGIN}/`)
+      }
+      await wc.executeJavaScript(
+        buildGoogleFallbackBannerScript({
+          title: 'Google 登录受限或需要通行密钥',
+          detail: '请尝试更换网络代理后重新打开登录窗口，或点击右侧在系统浏览器打开 Antigravity 核对账号状态。',
+          buttonLabel: '在系统浏览器打开',
+          actionUrl: 'botark-external://open'
+        }),
+        true
+      )
+    } catch {
+      /* ignore transient navigation states */
+    }
   }
-  win.webContents.on('did-finish-load', onNav)
-  win.webContents.on('did-navigate', onNav)
-  win.webContents.on('did-redirect-navigation', onNav)
 
-  win.webContents.on('did-create-window', (childWin) => {
+  const onNav = (wc: WebContents) => {
+    void finishIfSignedIn()
+    void maybeShowGoogleFallbackBanner(wc)
+  }
+  win.webContents.on('did-finish-load', () => onNav(win.webContents))
+  win.webContents.on('did-navigate', () => onNav(win.webContents))
+  win.webContents.on('did-redirect-navigation', () => onNav(win.webContents))
+
+  const trackChildWindow = (childWin: BrowserWindow) => {
     childPopups.add(childWin)
-    childWin.webContents.setUserAgent(cleanUa)
-    childWin.webContents.on('did-finish-load', onNav)
-    childWin.webContents.on('did-navigate', onNav)
+    attachNavigationGuards(childWin.webContents, childWin)
+    childWin.webContents.on('did-finish-load', () => onNav(childWin.webContents))
+    childWin.webContents.on('did-navigate', () => onNav(childWin.webContents))
+    childWin.webContents.on('did-redirect-navigation', () => onNav(childWin.webContents))
+    childWin.webContents.on('did-create-window', (nested) => trackChildWindow(nested))
     childWin.on('closed', () => {
       childPopups.delete(childWin)
       void finishIfSignedIn()
     })
-  })
+  }
+  win.webContents.on('did-create-window', trackChildWindow)
 
   const onCookie = (
     _event: unknown,

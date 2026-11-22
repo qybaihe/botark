@@ -30,6 +30,7 @@ import {
   importDotCredentialsFromRaw,
   importDotMemorySnapshot,
   isDotAckMessage,
+  isEphemeralRoomTurnBotId,
   listDotLibraryNodes,
   listDotModels,
   listDots,
@@ -102,7 +103,7 @@ export async function runDotRpc(req: DotRpcRequest): Promise<DotRpcResponse> {
           activeDotId: dot.id,
           roomId: dot.messagingRoomId,
           threadId: dot.activeRootThreadId,
-          ...(req.botId ? { botId: req.botId } : {})
+          ...(req.botId && !isEphemeralRoomTurnBotId(req.botId) ? { botId: req.botId } : {})
         })
         void ensureCelsiusWatcher(req.accountId, dot.messagingRoomId)
         const history = await listRoomMessages(req.accountId, {
@@ -173,15 +174,20 @@ export async function runDotRpc(req: DotRpcRequest): Promise<DotRpcResponse> {
         // After a profile switch the renderer can still name the old dot/room.
         const target = resolveDotTarget(req, acc)
         const mode = req.mode ?? acc?.mode ?? 'dot'
-        if (req.botId) {
+        if (req.botId && !isEphemeralRoomTurnBotId(req.botId)) {
           patchStoredDotAccount(req.accountId, { botId: req.botId })
         }
+
+        const nativeThreadId =
+          req.roomId && req.roomId !== acc?.roomId ? req.roomId : undefined
 
         const runNativeTurn = async () => {
           const out = await streamDotNativeTurn(req.accountId, {
             text: req.text,
+            threadId: nativeThreadId,
             model: req.model ?? acc?.model ?? 'gpt-6-astra',
             effort: req.effort ?? acc?.effort ?? 'medium',
+            onSent: () => broadcast({ type: 'sent', accountId: req.accountId }),
             onActivity: (code, text, busy) => {
               broadcast({
                 type: 'activity',

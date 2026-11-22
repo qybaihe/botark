@@ -1376,7 +1376,7 @@ export interface SecurityStoreAudit {
 
 export interface SecurityAccountAudit {
   accountId: string
-  platformId?: 'meta-muse' | 'grok' | 'hark' | 'dot' | 'hermes' | 'antigravity'
+  platformId?: 'meta-muse' | 'grok' | 'hark' | 'dot' | 'hermes' | 'antigravity' | 'cue'
   partition: string
   transportProtocol: string
   credentialIsolation: string
@@ -1403,8 +1403,142 @@ export interface SecurityVaultStatus {
 
 export interface VaultStatusRequest {
   accountId?: string
-  platformId?: 'meta-muse' | 'grok' | 'hark' | 'dot' | 'hermes' | 'antigravity'
+  platformId?: 'meta-muse' | 'grok' | 'hark' | 'dot' | 'hermes' | 'antigravity' | 'cue'
 }
+
+export const CUE_CHANNELS = {
+  openLogin: 'bothub:cue:open-login',
+  cancelLogin: 'bothub:cue:cancel-login',
+  importCredentials: 'bothub:cue:import-credentials',
+  clearAuth: 'bothub:cue:clear-auth',
+  authStatus: 'bothub:cue:auth-status',
+  getSession: 'bothub:cue:get-session',
+  rpc: 'bothub:cue:rpc',
+  event: 'bothub:cue:event'
+} as const
+
+export interface CueOpenLoginRequest {
+  accountId: string
+  openInBrowser?: boolean
+}
+
+export interface CueImportCredentialsRequest {
+  accountId: string
+  credential?: string
+  rawInput?: string
+  accessToken?: string
+  refreshToken?: string
+}
+
+export interface CueAuthStatus {
+  accountId: string
+  signedIn: boolean
+  handle?: string
+  displayName?: string
+  accountSlot?: string
+  deviceId?: string
+  authKind?: 'oauth' | 'api-key' | 'session' | 'mock'
+  hasProxy?: boolean
+  error?: string
+}
+
+export interface CueAuthSessionPayload {
+  accountId: string
+  signedIn: boolean
+  handle?: string
+  displayName?: string
+  accountSlot?: string
+  deviceId?: string
+  authKind?: 'oauth' | 'api-key' | 'session' | 'mock'
+}
+
+export type CueRpcRequest =
+  | { accountId: string; op: 'health'; baseUrl?: string }
+  | { accountId: string; op: 'listAgents'; baseUrl?: string }
+  | { accountId: string; op: 'listTasks'; agentId?: string; baseUrl?: string }
+  | {
+      accountId: string
+      op: 'sendMessage'
+      agentId?: string
+      sessionId?: string
+      conversationId?: string
+      text: string
+      baseUrl?: string
+    }
+  | {
+      accountId: string
+      op: 'watchUntilReply'
+      agentId?: string
+      sessionId?: string
+      conversationId?: string
+      afterMessageId?: string
+      baseUrl?: string
+    }
+  | {
+      accountId: string
+      op: 'approve'
+      approvalId: string
+      decision: string
+      sessionId?: string
+      baseUrl?: string
+    }
+  | { accountId: string; op: 'quota'; baseUrl?: string }
+
+export type CueRpcResponse =
+  | { ok: true; data: unknown }
+  | { ok: false; status: number; code?: string; message: string }
+
+export type CueMainEvent =
+  | {
+      type: 'auth'
+      accountId: string
+      signedIn: boolean
+      handle?: string
+      displayName?: string
+      accountSlot?: string
+      windowClosed?: boolean
+    }
+  | {
+      type: 'roster_changed'
+      accountId: string
+    }
+  | {
+      type: 'activity'
+      accountId: string
+      agentId?: string
+      sessionId?: string
+      activityCode?: string
+      activityText?: string | null
+      busy: boolean
+    }
+  | {
+      type: 'stream'
+      accountId: string
+      agentId?: string
+      conversationId?: string
+      sessionId?: string
+      messageId: string
+      text: string
+      done: boolean
+    }
+  | {
+      type: 'turn_failed'
+      accountId: string
+      agentId?: string
+      conversationId?: string
+      message: string
+    }
+  | {
+      type: 'approvals'
+      accountId: string
+      pending: Array<Record<string, unknown>>
+    }
+  | {
+      type: 'message_deleted'
+      accountId: string
+      conversationId?: string
+      messageIds: string[]
+    }
 
 export const ANTIGRAVITY_CHANNELS = {
   openLogin: 'bothub:antigravity:open-login',

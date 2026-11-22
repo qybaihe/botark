@@ -12,7 +12,7 @@ import type {
   WebViewInfo
 } from '@shared/ipc'
 import { applyProxyToPartition } from './muse/accountProxy'
-import { cleanMuseChromeUserAgent } from './muse/museLoginHelpers'
+import { installGoogleOAuthHeaderGuard } from './googleOAuthUaGuard'
 
 /**
  * Manages embedded platform web sessions for one window.
@@ -121,6 +121,8 @@ export class WebContentsViewManager {
     }
 
     const partition = partitionForAccount(request.accountId)
+    const ses = electronSession.fromPartition(partition)
+    installGoogleOAuthHeaderGuard(ses)
     void applyProxyToPartition(request.accountId).catch(() => {})
 
     const view = new WebContentsView({
@@ -133,14 +135,38 @@ export class WebContentsViewManager {
       }
     })
     view.setBackgroundColor('#ffffff')
-    view.webContents.setUserAgent(cleanMuseChromeUserAgent(view.webContents.getUserAgent()))
 
-    // Keep popups (cloud browser, vault login, OAuth) inside the account's isolated BotArk partition!
+    // Keep popups (cloud browser, vault login, OAuth) inside the account's isolated BotArk partition
+    // and preserve `window.opener` via same-partition child BrowserWindows.
     view.webContents.setWindowOpenHandler(({ url }) => {
-      if (isHttpUrl(url)) {
-        void this.openInPartition({ accountId: request.accountId, url })
+      if (url === 'about:blank' || isHttpUrl(url)) {
+        return {
+          action: 'allow',
+          overrideBrowserWindowOptions: {
+            width: 1060,
+            height: 740,
+            minWidth: 680,
+            minHeight: 480,
+            parent: this.window.isDestroyed() ? undefined : this.window,
+            title: 'BotArk 安全会话窗口',
+            autoHideMenuBar: true,
+            backgroundColor: '#ffffff',
+            webPreferences: {
+              partition,
+              sandbox: true,
+              contextIsolation: true,
+              nodeIntegration: false
+            }
+          }
+        }
+      }
+      if (/^mailto:/i.test(url)) {
+        void shell.openExternal(url)
       }
       return { action: 'deny' }
+    })
+    view.webContents.on('did-create-window', (childWin) => {
+      this.trackChildWindow(childWin, partition)
     })
     view.webContents.on('will-navigate', (event, url) => {
       if (!isHttpUrl(url)) event.preventDefault()
@@ -247,7 +273,7 @@ export class WebContentsViewManager {
     await applyProxyToPartition(request.accountId).catch(() => {})
     const partition = partitionForAccount(request.accountId)
     const ses = electronSession.fromPartition(partition)
-    ses.setUserAgent(cleanMuseChromeUserAgent(ses.getUserAgent()))
+    installGoogleOAuthHeaderGuard(ses)
 
     const popup = new BrowserWindow({
       width: 1060,
@@ -266,23 +292,52 @@ export class WebContentsViewManager {
       }
     })
 
-    popup.webContents.setUserAgent(cleanMuseChromeUserAgent(popup.webContents.getUserAgent()))
-    popup.webContents.setWindowOpenHandler(({ url }) => {
-      if (isHttpUrl(url)) {
-        void popup.loadURL(url).catch(() => {})
-      } else if (/^mailto:/i.test(url)) {
-        void shell.openExternal(url)
-      }
-      return { action: 'deny' }
-    })
+    this.trackChildWindow(popup, partition)
 
+    await popup.loadURL(request.url).catch((err) => {
+      console.warn('[web-view] openInPartition failed:', err instanceof Error ? err.message : err)
+    })
+  }
+
+  private trackChildWindow(popup: BrowserWindow, partition: string): void {
     this.childWindows.add(popup)
     popup.on('closed', () => {
       this.childWindows.delete(popup)
     })
-
-    await popup.loadURL(request.url).catch((err) => {
-      console.warn('[web-view] openInPartition failed:', err instanceof Error ? err.message : err)
+    popup.webContents.setWindowOpenHandler(({ url }) => {
+      if (url === 'about:blank' || isHttpUrl(url)) {
+        return {
+          action: 'allow',
+          overrideBrowserWindowOptions: {
+            width: 540,
+            height: 700,
+            minWidth: 420,
+            minHeight: 480,
+            parent: popup.isDestroyed() ? (this.window.isDestroyed() ? undefined : this.window) : popup,
+            title: 'BotArk 安全会话窗口',
+            autoHideMenuBar: true,
+            backgroundColor: '#ffffff',
+            webPreferences: {
+              partition,
+              sandbox: true,
+              contextIsolation: true,
+              nodeIntegration: false
+            }
+          }
+        }
+      }
+      if (/^mailto:/i.test(url)) {
+        void shell.openExternal(url)
+      }
+      return { action: 'deny' }
+    })
+    popup.webContents.on('did-create-window', (nested) => {
+      this.trackChildWindow(nested, partition)
+    })
+    popup.webContents.on('will-navigate', (event, url) => {
+      if (url !== 'about:blank' && !isHttpUrl(url)) {
+        event.preventDefault()
+      }
     })
   }
 

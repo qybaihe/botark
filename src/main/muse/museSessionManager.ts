@@ -1,6 +1,11 @@
-import { BrowserWindow, Notification, session as electronSession } from 'electron'
+import { BrowserWindow, Notification, session as electronSession, shell, type WebContents } from 'electron'
 import type { MuseMainEvent, MuseSessionStatus, WebViewBounds } from '@shared/ipc'
-import { installGoogleOAuthHeaderGuard } from '../googleOAuthUaGuard'
+import {
+  buildGoogleFallbackBannerScript,
+  GOOGLE_BLOCK_CHECK_SCRIPT,
+  installGoogleOAuthHeaderGuard,
+  isGoogleBlockedOrPasskeyText
+} from '../googleOAuthUaGuard'
 import { partitionForAccount, webViewId, WebContentsViewManager } from '../webContentsViewManager'
 import { MUSE_HOOK_SCRIPT, museDomSendScript, museRpcScript } from './hookScript'
 import {
@@ -182,7 +187,7 @@ export class MuseSessionManager {
     if (!session) {
       await applyProxyToPartition(accountId)
       const ses = electronSession.fromPartition(partitionForAccount(accountId))
-      ses.setUserAgent(cleanMuseChromeUserAgent(ses.getUserAgent()))
+      installGoogleOAuthHeaderGuard(ses)
       session = {
         accountId,
         botId,
@@ -222,14 +227,36 @@ export class MuseSessionManager {
     const view = this.views.getView(viewId)
     if (!view) return
 
-    view.webContents.setUserAgent(cleanMuseChromeUserAgent(view.webContents.getUserAgent()))
+    const partition = partitionForAccount(accountId)
+    installGoogleOAuthHeaderGuard(electronSession.fromPartition(partition))
 
-    view.webContents.setWindowOpenHandler(({ url }) => {
-      if (isAllowedMuseUrl(url) && url !== 'about:blank') {
-        void view.webContents.loadURL(url)
-      }
-      return { action: 'deny' }
-    })
+    const attachViewPopupGuards = (wc: WebContents) => {
+      wc.setWindowOpenHandler(({ url }) => {
+        if (isAllowedMuseUrl(url)) {
+          return {
+            action: 'allow',
+            overrideBrowserWindowOptions: {
+              width: 540,
+              height: 700,
+              title: 'Muse 安全登录',
+              autoHideMenuBar: true,
+              parent: this.window.isDestroyed() ? undefined : this.window,
+              webPreferences: {
+                partition,
+                sandbox: true,
+                contextIsolation: true,
+                nodeIntegration: false
+              }
+            }
+          }
+        }
+        return { action: 'deny' }
+      })
+      wc.on('did-create-window', (childWin) => {
+        attachViewPopupGuards(childWin.webContents)
+      })
+    }
+    attachViewPopupGuards(view.webContents)
 
     void applyMuseKeepAlive(view.webContents)
     view.webContents.on('dom-ready', () => {
@@ -1622,7 +1649,6 @@ export class MuseSessionManager {
     const partition = partitionForAccount(accountId)
     const ses = electronSession.fromPartition(partition)
     const cleanUa = cleanMuseChromeUserAgent(ses.getUserAgent())
-    ses.setUserAgent(cleanUa)
     installGoogleOAuthHeaderGuard(ses)
 
     const pendingStatus: MuseSessionStatus = {
@@ -1679,7 +1705,6 @@ export class MuseSessionManager {
         backgroundThrottling: false
       }
     })
-    win.webContents.setUserAgent(cleanUa)
     this.loginWindows.set(accountId, win)
 
     const childPopups = new Set<BrowserWindow>()
@@ -1701,25 +1726,60 @@ export class MuseSessionManager {
       return false
     }
 
-    win.webContents.setWindowOpenHandler(({ url }) => {
-      if (!isAllowedMuseUrl(url)) return { action: 'deny' }
-      return {
-        action: 'allow',
-        overrideBrowserWindowOptions: {
-          width: 540,
-          height: 700,
-          title: 'Muse 安全登录',
-          autoHideMenuBar: true,
-          parent: win.isDestroyed() ? undefined : win,
-          webPreferences: {
-            partition,
-            sandbox: true,
-            contextIsolation: true,
-            nodeIntegration: false
+    const maybeShowGoogleFallbackBanner = async (wc: WebContents): Promise<void> => {
+      if (wc.isDestroyed()) return
+      try {
+        const currentUrl = wc.getURL()
+        const bodyText = (await wc.executeJavaScript(GOOGLE_BLOCK_CHECK_SCRIPT, true)) as string
+        if (!isGoogleBlockedOrPasskeyText(bodyText, currentUrl)) return
+        await wc.executeJavaScript(
+          buildGoogleFallbackBannerScript({
+            title: 'Google 登录受限或需要通行密钥',
+            detail: '建议在 Muse 登录页改用邮箱验证码（Email OTP）登录，或点击右侧在系统浏览器中打开 muse.ai。',
+            buttonLabel: '在系统浏览器打开',
+            actionUrl: 'botark-external://open'
+          }),
+          true
+        )
+      } catch {
+        /* ignore transient navigation states */
+      }
+    }
+
+    const attachLoginNavigationGuards = (wc: WebContents, parentForChild: BrowserWindow) => {
+      wc.setWindowOpenHandler(({ url }) => {
+        if (url === 'botark-external://open') {
+          void shell.openExternal(MUSE_ORIGIN)
+          return { action: 'deny' }
+        }
+        if (!isAllowedMuseUrl(url)) return { action: 'deny' }
+        return {
+          action: 'allow',
+          overrideBrowserWindowOptions: {
+            width: 540,
+            height: 700,
+            title: 'Muse 安全登录',
+            autoHideMenuBar: true,
+            parent: parentForChild.isDestroyed() ? undefined : parentForChild,
+            webPreferences: {
+              partition,
+              sandbox: true,
+              contextIsolation: true,
+              nodeIntegration: false
+            }
           }
         }
-      }
-    })
+      })
+
+      wc.on('will-navigate', (event, url) => {
+        if (url === 'botark-external://open') {
+          event.preventDefault()
+          void shell.openExternal(MUSE_ORIGIN)
+        }
+      })
+    }
+
+    attachLoginNavigationGuards(win.webContents, win)
 
     let settling = false
     let checking = false
@@ -1768,31 +1828,28 @@ export class MuseSessionManager {
       }
     }
 
-    const onNav = () => {
+    const onNav = (wc?: WebContents) => {
       void finishIfSignedIn()
+      if (wc) void maybeShowGoogleFallbackBanner(wc)
     }
-    win.webContents.on('did-finish-load', onNav)
-    win.webContents.on('did-navigate', onNav)
-    win.webContents.on('did-navigate-in-page', onNav)
-    win.webContents.on('did-redirect-navigation', onNav)
+    win.webContents.on('did-finish-load', () => onNav(win.webContents))
+    win.webContents.on('did-navigate', () => onNav(win.webContents))
+    win.webContents.on('did-navigate-in-page', () => onNav())
+    win.webContents.on('did-redirect-navigation', () => onNav(win.webContents))
 
-    win.webContents.on('did-create-window', (childWin) => {
+    const trackChildWindow = (childWin: BrowserWindow) => {
       childPopups.add(childWin)
-      childWin.webContents.setUserAgent(cleanUa)
-      childWin.webContents.setWindowOpenHandler(({ url }) => {
-        if (isAllowedMuseUrl(url) && url !== 'about:blank') {
-          void childWin.webContents.loadURL(url)
-        }
-        return { action: 'deny' }
-      })
-      childWin.webContents.on('did-finish-load', onNav)
-      childWin.webContents.on('did-navigate', onNav)
-      childWin.webContents.on('did-redirect-navigation', onNav)
+      attachLoginNavigationGuards(childWin.webContents, childWin)
+      childWin.webContents.on('did-finish-load', () => onNav(childWin.webContents))
+      childWin.webContents.on('did-navigate', () => onNav(childWin.webContents))
+      childWin.webContents.on('did-redirect-navigation', () => onNav(childWin.webContents))
+      childWin.webContents.on('did-create-window', (nested) => trackChildWindow(nested))
       childWin.on('closed', () => {
         childPopups.delete(childWin)
         void finishIfSignedIn()
       })
-    })
+    }
+    win.webContents.on('did-create-window', trackChildWindow)
 
     const onCookie = (
       _event: unknown,

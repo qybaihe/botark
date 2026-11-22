@@ -49,6 +49,7 @@ import { useBotStore } from '@/store/botStore'
 import {
   isFinal,
   mentions,
+  splitMentionSegments,
   stripFinalPrefix,
   type CollabRoom,
   type RoomMember,
@@ -336,8 +337,10 @@ function CreateRoom() {
   const connectAccount = useBotStore((s) => s.connectAccount)
   const setAddBotOpen = useBotStore((s) => s.setAddBotOpen)
 
+  const isReadyStatus = (status?: string) =>
+    status === 'online' || status === 'attention' || status === 'busy'
   const onlineBots = useMemo(
-    () => bots.filter((b) => accounts[b.activeAccountId]?.status === 'online'),
+    () => bots.filter((b) => isReadyStatus(accounts[b.activeAccountId]?.status)),
     [bots, accounts]
   )
   const [ids, setIds] = useState<string[]>(() => onlineBots.slice(0, 3).map((b) => b.id))
@@ -353,6 +356,11 @@ function CreateRoom() {
         .map((id) => bots.find((b) => b.id === id))
         .filter((b): b is NonNullable<typeof b> => Boolean(b)),
     [ids, bots]
+  )
+  const hasDuplicateNames = useMemo(
+    () =>
+      new Set(selectedBots.map((b) => b.name.trim().toLowerCase())).size !== selectedBots.length,
+    [selectedBots]
   )
 
   const toggleBot = (botId: string) => {
@@ -444,11 +452,21 @@ function CreateRoom() {
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                 {bots.map((b) => {
                   const acc = accounts[b.activeAccountId]
-                  const isOnline = acc?.status === 'online'
+                  const isOnline = isReadyStatus(acc?.status)
                   const orderIndex = ids.indexOf(b.id)
                   const checked = orderIndex >= 0
                   const maxReached = !checked && ids.length >= 6
                   const platform = getPlatform(b.platformId)
+                  const connectAndSelect = async () => {
+                    if (!b.activeAccountId || acc?.pending) return
+                    await connectAccount(b.activeAccountId)
+                    const nextStatus = useBotStore.getState().accounts[b.activeAccountId]?.status
+                    if (isReadyStatus(nextStatus)) {
+                      setIds((prev) =>
+                        prev.includes(b.id) || prev.length >= 6 ? prev : [...prev, b.id]
+                      )
+                    }
+                  }
 
                   return (
                     <div
@@ -457,7 +475,11 @@ function CreateRoom() {
                       aria-checked={isOnline ? checked : undefined}
                       tabIndex={isOnline && !maxReached ? 0 : -1}
                       onClick={() => {
-                        if (isOnline && !maxReached) toggleBot(b.id)
+                        if (isOnline && !maxReached) {
+                          toggleBot(b.id)
+                        } else if (!isOnline && !maxReached) {
+                          void connectAndSelect()
+                        }
                       }}
                       onKeyDown={(e) => {
                         if ((e.key === ' ' || e.key === 'Enter') && isOnline && !maxReached) {
@@ -471,7 +493,9 @@ function CreateRoom() {
                           ? 'border-ink/25 bg-active/70 shadow-hairline'
                           : isOnline && !maxReached
                             ? 'cursor-pointer border-line bg-surface hover:border-line-strong hover:bg-hover/45'
-                            : 'border-line/60 bg-sunken/35 opacity-55'
+                            : !maxReached
+                              ? 'cursor-pointer border-line/60 bg-sunken/35 opacity-75 hover:opacity-95'
+                              : 'border-line/60 bg-sunken/35 opacity-55'
                       )}
                     >
                       <BotAvatar
@@ -491,7 +515,10 @@ function CreateRoom() {
                         </span>
                         <span className="mt-0.5 flex items-center gap-1 text-[11px] text-ink-muted">
                           <PlatformGlyph platform={platform} size="sm" className="size-3" />
-                          <span className="truncate">{platform.name}</span>
+                          <span className="truncate">
+                            {platform.name}
+                            {acc?.handle && acc.handle !== b.name ? ` · ${acc.handle}` : ''}
+                          </span>
                         </span>
                       </div>
 
@@ -507,19 +534,25 @@ function CreateRoom() {
                         <Button
                           size="sm"
                           variant="secondary"
+                          disabled={Boolean(acc?.pending)}
                           onClick={(e) => {
                             e.stopPropagation()
-                            if (b.activeAccountId) void connectAccount(b.activeAccountId)
+                            void connectAndSelect()
                           }}
                           className="h-6.5 px-2.5 text-[11px]"
                         >
-                          连接
+                          {acc?.pending ? '连接中…' : '连接'}
                         </Button>
                       )}
                     </div>
                   )
                 })}
               </div>
+            )}
+            {hasDuplicateNames && (
+              <p className="px-0.5 text-[11.5px] text-ink-muted">
+                同名成员将在创建时自动编号或按账号区分
+              </p>
             )}
           </div>
 
@@ -584,17 +617,11 @@ function HighlightMentions({
   members: ReadonlyArray<RoomMember>
   invert?: boolean
 }) {
-  if (!members.length) return <>{text}</>
-  const escaped = members
-    .map((m) => m.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-    .sort((a, b) => b.length - a.length)
-  const pattern = new RegExp(`(@(?:${escaped.join('|')}))(?![\\p{L}\\p{N}_])`, 'giu')
-  const parts = text.split(pattern)
+  const segments = splitMentionSegments(text, members)
   return (
     <>
-      {parts.map((part, i) =>
-        part.startsWith('@') &&
-        members.some((m) => '@' + m.name.toLowerCase() === part.toLowerCase()) ? (
+      {segments.map((seg, i) =>
+        seg.member ? (
           <span
             key={i}
             className={cn(
@@ -602,10 +629,10 @@ function HighlightMentions({
               invert ? 'bg-canvas/18 text-main' : 'bg-hover text-ink'
             )}
           >
-            {part}
+            {seg.text}
           </span>
         ) : (
-          <span key={i}>{part}</span>
+          <span key={i}>{seg.text}</span>
         )
       )}
     </>
@@ -836,15 +863,24 @@ export function RoomView({ id }: { id: string }) {
 
   if (!room) return <CreateRoom />
 
-  const mentionMatch = /(?:^|\s)@([^@\n]*)$/u.exec(text)
-  const mentionCandidates = mentionMatch
-    ? room.members.filter((m) =>
-        m.name.toLowerCase().includes(mentionMatch[1]!.trim().toLowerCase())
-      )
-    : []
+  const mentionMatch = /(?:^|.*[^A-Za-z0-9_.+-])(@([^\n]*))$/u.exec(text)
+  const atIdx = mentionMatch
+    ? mentionMatch.index + mentionMatch[0].length - mentionMatch[1]!.length
+    : -1
+  const rawQuery = mentionMatch?.[2] ?? ''
+  const closeAfterExact =
+    Boolean(mentionMatch) &&
+    /\s$/.test(rawQuery) &&
+    room.members.some((m) => m.name.toLowerCase() === rawQuery.trimEnd().toLowerCase()) &&
+    !room.members.some((m) => m.name.toLowerCase().startsWith(rawQuery.toLowerCase()))
+  const mentionCandidates =
+    mentionMatch && !closeAfterExact
+      ? room.members.filter((m) =>
+          m.name.toLowerCase().includes(rawQuery.trim().toLowerCase())
+        )
+      : []
 
   const insertMention = (memberName: string) => {
-    const atIdx = text.lastIndexOf('@')
     const next =
       mentionMatch && atIdx >= 0
         ? `${text.slice(0, atIdx)}@${memberName} `
@@ -978,9 +1014,22 @@ export function RoomView({ id }: { id: string }) {
       </PaneHeader>
 
       {error && (
-        <p role="alert" className="mx-auto mt-2 max-w-[780px] px-4 text-[12.5px] text-status-error">
-          {error}
-        </p>
+        <div className="mx-auto mt-2 flex max-w-[780px] flex-wrap items-center gap-2 px-4">
+          <p role="alert" className="text-[12.5px] text-status-error">
+            {error}
+          </p>
+          {room.mode === 'manual' &&
+            room.members.map((m) => (
+              <button
+                key={m.botId}
+                type="button"
+                onClick={() => insertMention(m.name)}
+                className="press rounded-full border border-line bg-surface px-2.5 py-0.5 text-[11.5px] font-medium text-ink-secondary hover:bg-hover hover:text-ink"
+              >
+                @{m.name}
+              </button>
+            ))}
+        </div>
       )}
 
       {/* Main Timeline or Quiet Empty Stage */}
@@ -1142,7 +1191,11 @@ export function RoomView({ id }: { id: string }) {
                   resize()
                 }}
                 onKeyDown={onKeyDown}
-                placeholder="发消息，或输入 @ 点名接力…"
+                placeholder={
+                  room.mode === 'manual'
+                    ? '当前为手动 @ 模式，输入 @ 成员名点名回复…'
+                    : '发消息，或输入 @ 点名接力…'
+                }
                 aria-label={`发消息到 ${room.title}`}
                 className="block max-h-[200px] min-h-8 flex-1 resize-none bg-transparent px-1.5 py-[5px] text-[14px] leading-[22px] text-ink outline-none placeholder:text-ink-muted"
               />

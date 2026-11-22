@@ -57,6 +57,15 @@ export const PLATFORMS: readonly PlatformDescriptor[] = [
     availability: 'available',
     monogram: 'He',
     homeUrl: 'http://127.0.0.1:8642'
+  },
+  {
+    id: 'cue',
+    name: 'Cue',
+    description: 'Manus 个人智能体 · 多账号隔离、Agent 协同与云端沙盒',
+    availability: 'available',
+    monogram: 'Cu',
+    homeUrl: 'https://app.cue.im',
+    loginUrl: 'https://cue.im/login'
   }
 ]
 

@@ -1,9 +1,12 @@
 import { create } from 'zustand'
-import { persist } from 'zustand/middleware'
+import { createJSONStorage, persist } from 'zustand/middleware'
 import { adapterRegistry } from '@adapters/registry'
+import type { ConnectionStatus, SendReceipt } from '@adapters/types'
 import { createId } from '@shared/id'
 import { getBridge } from '@/lib/bridge'
 import { cancelPlatformTurn, useBotStore } from '@/store/botStore'
+import { createSafeStorage } from '@/store/delivery'
+import type { Bot } from '@/types'
 import {
   isFinal,
   mentions,
@@ -38,6 +41,9 @@ export const useRooms = create<RoomState>()(
     }),
     {
       name: 'botark-collaboration-rooms',
+      storage: createJSONStorage(() =>
+        createSafeStorage(() => (typeof localStorage === 'undefined' ? undefined : localStorage))
+      ),
       partialize: (s) => ({ rooms: s.rooms }),
       merge: (persisted, current) => {
         const raw = persisted && typeof persisted === 'object' ? (persisted as { rooms?: unknown }) : {}
@@ -64,6 +70,118 @@ export const useRooms = create<RoomState>()(
     }
   )
 )
+
+const isConnectedStatus = (status?: ConnectionStatus) =>
+  status === 'online' || status === 'attention' || status === 'busy'
+
+function turnLockKey(member: Pick<RoomMember, 'accountId' | 'agentId'>): string {
+  return member.agentId ? `${member.accountId}::${member.agentId}` : member.accountId
+}
+
+function findBotForMember(member: RoomMember, bots: Bot[]): Bot | undefined {
+  return (
+    bots.find((b) => b.id === member.botId) ??
+    bots.find(
+      (b) =>
+        b.platformId === member.platform &&
+        (b.activeAccountId === member.accountId || b.accountIds?.includes(member.accountId)) &&
+        (!member.agentId || b.selectedAgentId === member.agentId)
+    )
+  )
+}
+
+function reconcileRoomMemberList(
+  members: RoomMember[],
+  bots: Bot[],
+  accounts: Record<string, { handle?: string } | undefined>
+): { members: RoomMember[]; changed: boolean } {
+  let changed = false
+  const usedNames = new Set<string>()
+  const next = members.map((member) => {
+    const bot = findBotForMember(member, bots)
+    if (!bot) {
+      usedNames.add(member.name.toLowerCase())
+      return member
+    }
+    const nextBotId = bot.id || member.botId
+    const nextAccountId =
+      bot.activeAccountId ||
+      (bot.accountIds?.includes(member.accountId) ? member.accountId : bot.accountIds?.[0]) ||
+      member.accountId
+    const nextAgentId = bot.selectedAgentId ?? member.agentId
+    const rawName = bot.name?.trim()
+    let nextName = member.name
+    if (rawName) {
+      const handle = accounts[nextAccountId]?.handle?.trim()
+      const escapedRaw = rawName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const matchesWithHandle =
+        Boolean(handle) && member.name.toLowerCase() === `${rawName} · ${handle}`.toLowerCase()
+      const matchesWithNum = new RegExp(`^${escapedRaw} \\(\\d+\\)$`, 'i').test(member.name)
+      if (
+        member.name.toLowerCase() === rawName.toLowerCase() ||
+        matchesWithHandle ||
+        matchesWithNum
+      ) {
+        nextName = member.name
+      } else {
+        nextName = rawName
+      }
+      if (usedNames.has(nextName.toLowerCase())) {
+        if (handle && !usedNames.has(`${rawName} · ${handle}`.toLowerCase())) {
+          nextName = `${rawName} · ${handle}`
+        } else {
+          let n = 2
+          while (usedNames.has(`${rawName} (${n})`.toLowerCase())) n++
+          nextName = `${rawName} (${n})`
+        }
+      }
+    }
+    usedNames.add(nextName.toLowerCase())
+    const resetSession = nextAccountId !== member.accountId || nextAgentId !== member.agentId
+    const nextSessionId = resetSession ? undefined : member.sessionId
+    if (
+      nextBotId !== member.botId ||
+      nextAccountId !== member.accountId ||
+      nextAgentId !== member.agentId ||
+      nextName !== member.name ||
+      nextSessionId !== member.sessionId
+    ) {
+      changed = true
+      return {
+        ...member,
+        botId: nextBotId,
+        accountId: nextAccountId,
+        agentId: nextAgentId,
+        name: nextName,
+        sessionId: nextSessionId
+      }
+    }
+    return member
+  })
+  return { members: changed ? next : members, changed }
+}
+
+function reconcileRooms(targetRoomId?: string) {
+  const { bots, accounts } = useBotStore.getState()
+  const { rooms } = useRooms.getState()
+  let anyChanged = false
+  const nextRooms = rooms.map((room) => {
+    if (targetRoomId && room.id !== targetRoomId) return room
+    const res = reconcileRoomMemberList(room.members, bots, accounts)
+    if (!res.changed) return room
+    anyChanged = true
+    return { ...room, members: res.members }
+  })
+  if (anyChanged) {
+    useRooms.setState({ rooms: nextRooms })
+  }
+}
+
+useBotStore.subscribe((state, prev) => {
+  if (state.bots !== prev.bots) {
+    reconcileRooms()
+  }
+})
 
 const pendingTurns = new Map<string, Promise<unknown>>()
 const runs = new Map<string, AbortController>()
@@ -114,7 +232,7 @@ export function clearRoomTranscript(id: string) {
     messages: [],
     finalId: undefined,
     brief: '',
-    members: r.members.map((m) => ({ ...m, cursor: 0 }))
+    members: r.members.map((m) => ({ ...m, cursor: 0, sessionId: undefined }))
   }))
 }
 
@@ -140,23 +258,40 @@ export function deleteRoom(id: string) {
 
 export function addRoom(title: string, ids: string[], mode: CollabRoom['mode'], limit: number) {
   const { bots, accounts } = useBotStore.getState()
+  const usedNames = new Set<string>()
   const members: RoomMember[] = ids.map((id) => {
     const bot = bots.find((b) => b.id === id)
-    if (!bot || accounts[bot.activeAccountId]?.status !== 'online')
+    const storeStatus = bot ? accounts[bot.activeAccountId]?.status : undefined
+    const adapterStatus = bot
+      ? adapterRegistry.get(bot.platformId)?.getStatus(bot.activeAccountId)
+      : undefined
+    if (!bot || (!isConnectedStatus(storeStatus) && !isConnectedStatus(adapterStatus))) {
       throw new Error('请选择已连接的 Bot')
+    }
+    const rawBase = bot.name?.trim() || accounts[bot.activeAccountId]?.displayName?.trim() || id
+    let candidate = rawBase
+    if (usedNames.has(candidate.toLowerCase())) {
+      const handle = accounts[bot.activeAccountId]?.handle?.trim()
+      if (handle && !usedNames.has(`${rawBase} · ${handle}`.toLowerCase())) {
+        candidate = `${rawBase} · ${handle}`
+      } else {
+        let n = 2
+        while (usedNames.has(`${rawBase} (${n})`.toLowerCase())) n++
+        candidate = `${rawBase} (${n})`
+      }
+    }
+    usedNames.add(candidate.toLowerCase())
     return {
       botId: id,
       platform: bot.platformId,
       accountId: bot.activeAccountId,
-      name: bot.name.trim(),
+      name: candidate,
       agentId: bot.selectedAgentId,
-      sessionId: ['dot', 'grok'].includes(bot.platformId) ? bot.activeSessionId : undefined,
+      sessionId: undefined,
       cursor: 0
     }
   })
   if (members.length < 2 || members.length > 6) throw new Error('请选择 2–6 位成员')
-  if (new Set(members.map((m) => m.name.toLowerCase())).size !== members.length)
-    throw new Error('请先为同名 Bot 设置不同的名称')
   if (!Number.isInteger(limit) || limit < 1 || limit > 24) throw new Error('轮数应为 1–24')
   const room: CollabRoom = {
     id: createId('room'),
@@ -172,20 +307,114 @@ export function addRoom(title: string, ids: string[], mode: CollabRoom['mode'], 
   return room
 }
 
+export function removeMember(roomId: string, botId: string): { ok: boolean; error?: string } {
+  const room = roomById(roomId)
+  if (!room) return { ok: false, error: '未找到该群聊' }
+  if (!room.members.some((m) => m.botId === botId)) {
+    return { ok: false, error: '该成员不在当前群聊中' }
+  }
+  if (room.members.length <= 2) {
+    return { ok: false, error: '协作群聊至少需要保留 2 位成员' }
+  }
+  if (runs.has(roomId) || useRooms.getState().speakers[roomId]) {
+    stopRoom(roomId)
+  }
+  useRooms.setState((s) => ({
+    rooms: s.rooms.map((r) =>
+      r.id === roomId ? { ...r, members: r.members.filter((m) => m.botId !== botId) } : r
+    ),
+    errors: { ...s.errors, [roomId]: undefined }
+  }))
+  return { ok: true }
+}
+
+export function moveMemberToRoom(
+  sourceRoomId: string,
+  botId: string,
+  targetRoomId: string
+): { ok: boolean; error?: string } {
+  if (sourceRoomId === targetRoomId) {
+    return { ok: false, error: '目标群聊不能与当前群聊相同' }
+  }
+  const source = roomById(sourceRoomId)
+  if (!source) return { ok: false, error: '未找到源群聊' }
+  const target = roomById(targetRoomId)
+  if (!target) return { ok: false, error: '未找到目标群聊' }
+  const member = source.members.find((m) => m.botId === botId)
+  if (!member) return { ok: false, error: '该成员不在当前群聊中' }
+  if (source.members.length <= 2) {
+    return { ok: false, error: '当前群聊至少需要保留 2 位成员，无法移出' }
+  }
+  if (target.members.length >= 6) {
+    return { ok: false, error: '目标群聊成员已达上限（6 位）' }
+  }
+  if (target.members.some((m) => m.botId === botId)) {
+    return { ok: false, error: '目标群聊中已包含该 Bot' }
+  }
+  if (target.members.some((m) => m.name.toLowerCase() === member.name.toLowerCase())) {
+    return { ok: false, error: `目标群聊中已存在同名成员「${member.name}」` }
+  }
+
+  if (runs.has(sourceRoomId) || useRooms.getState().speakers[sourceRoomId]) {
+    stopRoom(sourceRoomId)
+  }
+  if (runs.has(targetRoomId) || useRooms.getState().speakers[targetRoomId]) {
+    stopRoom(targetRoomId)
+  }
+
+  const movedMember: RoomMember = {
+    ...member,
+    cursor: 0,
+    sessionId: undefined
+  }
+
+  useRooms.setState((s) => ({
+    rooms: s.rooms.map((r) => {
+      if (r.id === sourceRoomId) {
+        return { ...r, members: r.members.filter((m) => m.botId !== botId) }
+      }
+      if (r.id === targetRoomId) {
+        return { ...r, members: [...r.members, movedMember] }
+      }
+      return r
+    }),
+    errors: {
+      ...s.errors,
+      [sourceRoomId]: undefined,
+      [targetRoomId]: undefined
+    }
+  }))
+  return { ok: true }
+}
+
 async function memberReply(room: CollabRoom, member: RoomMember, signal: AbortSignal) {
   const adapter = adapterRegistry.get(member.platform)
   const bot = useBotStore
     .getState()
     .bots.find((b) => b.id === member.botId && b.accountIds.includes(member.accountId))
-  if (
-    !bot ||
-    !adapter ||
-    adapter.getStatus(member.accountId) !== 'online' ||
-    activeAccounts.has(member.accountId)
-  ) {
+  const lockKey = turnLockKey(member)
+  if (!bot || !adapter || activeAccounts.has(lockKey)) {
     throw new Error(`@${member.name} 正忙或已断开连接`)
   }
-  activeAccounts.add(member.accountId)
+  let status = adapter.getStatus(member.accountId)
+  if (status !== 'online' && status !== 'attention') {
+    if (status !== 'busy' && typeof adapter.connect === 'function') {
+      try {
+        const next = await adapter.connect(member.accountId)
+        signal.throwIfAborted()
+        status = next
+        if (next === 'online' || next === 'attention') {
+          useBotStore.getState().setAccountStatus?.(member.accountId, next)
+        }
+      } catch (err) {
+        if (signal.aborted) throw err
+      }
+    }
+  }
+  if ((status !== 'online' && status !== 'attention') || activeAccounts.has(lockKey)) {
+    throw new Error(`@${member.name} 正忙或已断开连接`)
+  }
+  activeAccounts.add(lockKey)
   const conversationId = 'room-turn-' + createId('turn')
   const replies = new Map<string, string>()
   const unsubscribe = adapter.onMessage((m) => {
@@ -229,13 +458,35 @@ async function memberReply(room: CollabRoom, member: RoomMember, signal: AbortSi
     }
     signal.throwIfAborted()
     signal.addEventListener('abort', cancel, { once: true })
-    const receipt = await adapter.sendMessage({
-      conversationId,
-      sessionId,
-      accountId: member.accountId,
-      agentId: member.agentId,
-      hermesSessionKey: room.id + '-' + member.botId,
-      text: prompt
+    const receipt = await new Promise<SendReceipt>((resolve, reject) => {
+      if (signal.aborted) {
+        reject(signal.reason ?? new Error('Aborted'))
+        return
+      }
+      const onAbort = () => {
+        reject(signal.reason ?? new Error('Aborted'))
+      }
+      signal.addEventListener('abort', onAbort, { once: true })
+      adapter
+        .sendMessage({
+          conversationId,
+          sessionId,
+          accountId: member.accountId,
+          agentId: member.agentId,
+          hermesSessionKey: room.id + '-' + member.botId,
+          text: prompt,
+          signal
+        })
+        .then(
+          (res) => {
+            signal.removeEventListener('abort', onAbort)
+            resolve(res)
+          },
+          (err) => {
+            signal.removeEventListener('abort', onAbort)
+            reject(err)
+          }
+        )
     })
     signal.throwIfAborted()
     const text = [...replies.values()].join('\n\n')
@@ -243,7 +494,7 @@ async function memberReply(room: CollabRoom, member: RoomMember, signal: AbortSi
     return { text, sessionId: receipt.sessionId ?? sessionId }
   } finally {
     unsubscribe()
-    activeAccounts.delete(member.accountId)
+    activeAccounts.delete(lockKey)
     signal.removeEventListener('abort', cancel)
   }
 }
@@ -254,6 +505,7 @@ export async function submitBrief(
   author = 'User',
   messageId = createId('post')
 ) {
+  reconcileRooms(id)
   const room = roomById(id)
   const text = input.trim()
   if (!room || !text) return
@@ -264,15 +516,25 @@ export async function submitBrief(
   const message: RoomMessage = { id: messageId, author, text, createdAt: Date.now() }
   update(id, (r) => ({ ...r, brief: text, finalId: undefined, messages: [...r.messages, message] }))
   const queue = mentions(text, room.members)
-  if (!queue.length && room.mode === 'auto') queue.push(room.members[0]!)
+  if (!queue.length && room.mode === 'auto') {
+    queue.push(room.members[0]!)
+  }
   try {
+    if (!queue.length && room.mode === 'manual') {
+      setError(
+        id,
+        `当前为「手动 @」模式，请用 @成员名 指定回复的成员（如 @${room.members[0]?.name ?? '成员'}）`
+      )
+      return
+    }
     const previous = pendingTurns.get(id)
     if (previous) await previous.catch(() => {})
     controller.signal.throwIfAborted()
     for (let turn = 0; turn < room.limit && queue.length; turn++) {
       const next = queue.shift()!
-      const current = roomById(id)!
-      const member = current.members.find((m) => m.botId === next.botId)!
+      const current = roomById(id)
+      const member = current?.members.find((m) => m.botId === next.botId)
+      if (!current || !member) continue
       useRooms.setState((s) => ({
         speakers: { ...s.speakers, [id]: member.name },
         turnProgress: { ...s.turnProgress, [id]: { turn: turn + 1, limit: current.limit } }

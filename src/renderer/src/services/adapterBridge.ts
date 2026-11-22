@@ -284,6 +284,27 @@ export function startAdapterBridge(): () => void {
     )
   }
 
+  const cueBridge = electronBridge()?.cue
+  if (cueBridge?.onEvent) {
+    unsubscribers.push(
+      cueBridge.onEvent((event) => {
+        const store = useBotStore.getState()
+        if (event.type === "auth") {
+          if (event.signedIn) {
+            store.setAccountStatus(event.accountId, "online")
+            void store.syncCueAccountBots(event.accountId)
+          } else if (!event.windowClosed) {
+            store.setAccountStatus(event.accountId, "offline", "未登录 Cue")
+          }
+          return
+        }
+        if (event.type === "roster_changed") {
+          void store.syncCueAccountBots(event.accountId)
+        }
+      })
+    )
+  }
+
   const watchdogTimer = setInterval(checkStalledReplies, 15_000)
 
   return () => {

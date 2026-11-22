@@ -84,11 +84,13 @@ function decodeEntryBody(raw: Record<string, unknown>): Record<string, unknown> 
 }
 
 function entryText(e: Record<string, unknown>): string {
-  const msg = e['message'] as Record<string, unknown> | undefined
+  const rawMsg = e['message']
+  const msg = rawMsg && typeof rawMsg === 'object' ? (rawMsg as Record<string, unknown>) : undefined
   const widget = msg?.['widget'] as Record<string, unknown> | undefined
   const text =
     (typeof e['text'] === 'string' && e['text']) ||
     (typeof e['content'] === 'string' && e['content']) ||
+    (typeof rawMsg === 'string' && rawMsg) ||
     (typeof msg?.['text'] === 'string' && (msg['text'] as string)) ||
     (typeof msg?.['content'] === 'string' && (msg['content'] as string)) ||
     (typeof widget?.['prompt'] === 'string' && (widget['prompt'] as string)) ||
@@ -212,8 +214,24 @@ export class GrokBotAdapter implements PlatformAdapter {
   private readonly listeners = new Set<AdapterListener>()
   private readonly agentsByAccount = new Map<string, GrokAgentSummary[]>()
   private readonly pendingApprovals = new Map<string, MuseApproval[]>()
-  private readonly agentForConversation = new Map<string, string>()
+  private readonly agentForConversation = new Map<string, Map<string, string>>()
   private mainEventWired = false
+
+  private getConvAgentMap(accountId: string): Map<string, string> {
+    let map = this.agentForConversation.get(accountId)
+    if (!map) {
+      map = new Map<string, string>()
+      this.agentForConversation.set(accountId, map)
+    }
+    return map
+  }
+
+  private getBoundAgentId(accountId: string, conversationId: string): string | undefined {
+    return (
+      this.agentForConversation.get(accountId)?.get(conversationId) ??
+      this.agentForConversation.get('*')?.get(conversationId)
+    )
+  }
 
   private ensureMainEventWired(): void {
     if (this.mainEventWired) return
@@ -250,13 +268,33 @@ export class GrokBotAdapter implements PlatformAdapter {
             windowClosed: ev.windowClosed
           })
         }
+      } else if (ev.type === 'stream') {
+        if (ev.done) {
+          if (this.getStatus(ev.accountId) !== 'online') {
+            this.setStatus(ev.accountId, 'online')
+          }
+        } else if (this.getStatus(ev.accountId) === 'offline') {
+          this.setStatus(ev.accountId, 'busy')
+        }
+      } else if (ev.type === 'activity') {
+        if (!ev.busy && this.getStatus(ev.accountId) !== 'online') {
+          this.setStatus(ev.accountId, 'online')
+        } else if (ev.busy && this.getStatus(ev.accountId) === 'offline') {
+          this.setStatus(ev.accountId, 'busy')
+        }
       } else if (ev.type === 'approvals') {
         const list = (Array.isArray(ev.pending) ? ev.pending : [])
           .filter((x): x is Record<string, unknown> => Boolean(x) && typeof x === 'object')
           .map(mapRawApprovalToMuseApproval)
         this.pendingApprovals.set(ev.accountId, list)
+        if (this.getStatus(ev.accountId) === 'offline' && list.length > 0) {
+          this.setStatus(ev.accountId, 'attention')
+        }
         this.emit({ type: 'approvals', accountId: ev.accountId, pending: list })
       } else if (ev.type === 'roster_changed') {
+        if (this.getStatus(ev.accountId) === 'offline') {
+          this.setStatus(ev.accountId, 'online')
+        }
         void this.refreshAgents(ev.accountId).catch(() => undefined)
       }
     })
@@ -416,11 +454,14 @@ export class GrokBotAdapter implements PlatformAdapter {
   private async syncWatchTargets(accountId: string): Promise<void> {
     const agents = this.agentsByAccount.get(accountId) ?? []
     const convMap: Record<string, string[]> = {}
-    for (const [convId, agentId] of this.agentForConversation.entries()) {
-      if (!agentId || !convId) continue
-      const list = convMap[agentId] ?? []
-      if (!list.includes(convId)) list.push(convId)
-      convMap[agentId] = list
+    const accountConvs = this.agentForConversation.get(accountId)
+    if (accountConvs) {
+      for (const [convId, agentId] of accountConvs.entries()) {
+        if (!agentId || !convId) continue
+        const list = convMap[agentId] ?? []
+        if (!list.includes(convId)) list.push(convId)
+        convMap[agentId] = list
+      }
     }
     try {
       const res = (await invokeGrokRpc({
@@ -457,22 +498,49 @@ export class GrokBotAdapter implements PlatformAdapter {
   }
 
   bindConversationAgent(conversationId: string, agentId: string, accountId?: string): void {
-    this.agentForConversation.set(conversationId, agentId)
+    if (conversationId.startsWith('room-turn-')) return
+    this.getConvAgentMap(accountId || '*').set(conversationId, agentId)
     if (accountId && getGrokAuth(accountId)?.signedIn) {
       void this.syncWatchTargets(accountId)
     }
   }
 
   async sendMessage(message: OutgoingMessage): Promise<SendReceipt> {
+    this.ensureMainEventWired()
+    if (message.signal?.aborted) {
+      throw new AdapterError('network', 'Aborted')
+    }
+
+    if (!getGrokAuth(message.accountId)?.signedIn) {
+      try {
+        const bridge = typeof window !== 'undefined' ? window.electron : undefined
+        const session = await bridge?.grok?.getSession?.(message.accountId)
+        if (session?.signedIn) {
+          this.setAuth({
+            accountId: message.accountId,
+            signedIn: true,
+            accountSlot: session.accountSlot,
+            teamId: session.teamId,
+            machineId: session.machineId
+          })
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+
     const auth = this.requireAuth(message.accountId)
 
     let agents = this.agentsByAccount.get(message.accountId)
-    if (!agents?.length) agents = await this.refreshAgents(message.accountId)
-    const agentId = message.agentId ?? this.agentForConversation.get(message.conversationId) ?? agents[0]?.id
+    if (!agents?.length) {
+      agents = await raceWithAbort(this.refreshAgents(message.accountId), message.signal)
+    }
+    const agentId =
+      message.agentId ?? this.getBoundAgentId(message.accountId, message.conversationId) ?? agents[0]?.id
     if (!agentId) throw new AdapterError('unknown-account', 'No Grok Bot agents on this account.')
 
     if (!message.conversationId.startsWith('room-turn-')) {
-      this.agentForConversation.set(message.conversationId, agentId)
+      this.getConvAgentMap(message.accountId).set(message.conversationId, agentId)
       void this.syncWatchTargets(message.accountId)
     }
 
@@ -491,16 +559,20 @@ export class GrokBotAdapter implements PlatformAdapter {
     try {
       let afterSeq = '0'
       try {
-        const hist = await invokeGrokRpc({
-          accountId: message.accountId,
-          timeZone,
-          op: 'listTranscriptEntries',
-          agentId,
-          sessionId,
-          limit: 5
-        })
+        const hist = await raceWithAbort(
+          invokeGrokRpc({
+            accountId: message.accountId,
+            timeZone,
+            op: 'listTranscriptEntries',
+            agentId,
+            sessionId,
+            limit: 5
+          }),
+          message.signal
+        )
         afterSeq = maxUpdatedSeq(hist)
-      } catch {
+      } catch (err) {
+        if (message.signal?.aborted) throw err
         /* start from 0 */
       }
 
@@ -513,19 +585,22 @@ export class GrokBotAdapter implements PlatformAdapter {
           size: a.size
         }))
 
-      await invokeGrokRpc({
-        accountId: message.accountId,
-        timeZone,
-        op: 'sendUserMessage',
-        agentId,
-        messageId,
-        text: message.text,
-        sessionId,
-        machineId: auth.machineId,
-        replyToId: message.replyToId,
-        replyQuote: message.replyQuote,
-        ...(uploadableAttachments.length ? { attachments: uploadableAttachments } : {})
-      })
+      await raceWithAbort(
+        invokeGrokRpc({
+          accountId: message.accountId,
+          timeZone,
+          op: 'sendUserMessage',
+          agentId,
+          messageId,
+          text: message.text,
+          sessionId,
+          machineId: auth.machineId,
+          replyToId: message.replyToId,
+          replyQuote: message.replyQuote,
+          ...(uploadableAttachments.length ? { attachments: uploadableAttachments } : {})
+        }),
+        message.signal
+      )
       message.onAccepted?.()
 
       let reply = ''
@@ -533,6 +608,7 @@ export class GrokBotAdapter implements PlatformAdapter {
       let replyWidgets: IncomingMessage['widgets']
       let replyTools: IncomingMessage['tools']
       let replyMedia: IncomingMessage['media']
+      let turnFailed = false
       let multiBubbles: Array<{
         messageId: string
         text: string
@@ -542,21 +618,25 @@ export class GrokBotAdapter implements PlatformAdapter {
       }> = []
 
       try {
-        const watched = await invokeGrokRpc({
-          accountId: message.accountId,
-          timeZone,
-          op: 'watchUntilReply',
-          agentId,
-          conversationId: message.conversationId,
-          sessionId,
-          afterUpdatedSeq: afterSeq,
-          afterMessageId: messageId,
-          timeoutMs: 600_000
-        })
+        const watched = await raceWithAbort(
+          invokeGrokRpc({
+            accountId: message.accountId,
+            timeZone,
+            op: 'watchUntilReply',
+            agentId,
+            conversationId: message.conversationId,
+            sessionId,
+            afterUpdatedSeq: afterSeq,
+            afterMessageId: messageId,
+            timeoutMs: 600_000
+          }),
+          message.signal
+        )
         if (watched && typeof watched === 'object') {
           const w = watched as Record<string, unknown>
           const tf = w['turnFailed'] as { code?: string; summary?: string } | undefined
           if (tf && !w['text'] && !Array.isArray(w['messages'])) {
+            turnFailed = true
             throw new AdapterError('network', tf.summary || `Turn failed (${tf.code})`)
           }
           if (Array.isArray(w['messages']) && w['messages'].length > 0) {
@@ -570,22 +650,100 @@ export class GrokBotAdapter implements PlatformAdapter {
           if (Array.isArray(w['media'])) replyMedia = w['media'] as IncomingMessage['media']
         }
       } catch (err) {
+        if (message.signal?.aborted) throw err
         if (err instanceof AdapterError) throw err
-        // Fallback: brief list poll if Watch unavailable.
+      }
+
+      if (
+        !multiBubbles.length &&
+        !reply &&
+        !replyWidgets?.length &&
+        !replyMedia?.length &&
+        !turnFailed &&
+        !message.signal?.aborted
+      ) {
+        // Fallback: poll listTranscriptEntries when watchUntilReply resolves empty or fails.
         for (let i = 0; i < 15; i++) {
-          await sleep(1000)
+          if (message.signal?.aborted) throw new AdapterError('network', 'Aborted')
+          if (i > 0) await sleep(1000, message.signal)
           try {
-            const hist = await invokeGrokRpc({
-              accountId: message.accountId,
-              timeZone,
-              op: 'listTranscriptEntries',
-              agentId,
-              sessionId,
-              limit: 40
-            })
+            const hist = (await raceWithAbort(
+              invokeGrokRpc({
+                accountId: message.accountId,
+                timeZone,
+                op: 'listTranscriptEntries',
+                agentId,
+                sessionId,
+                limit: 40
+              }),
+              message.signal
+            )) as Record<string, unknown> | undefined
             reply = extractReplyText(hist, messageId)
-            if (reply) break
-          } catch {
+            if (!reply && hist && Array.isArray(hist['entries'])) {
+              const entriesList = hist['entries'] as Array<Record<string, unknown>>
+              let baseSeq = 0n
+              try {
+                baseSeq = BigInt(afterSeq || '0')
+              } catch {
+                baseSeq = 0n
+              }
+              for (let j = entriesList.length - 1; j >= 0; j--) {
+                const e = decodeEntryBody(entriesList[j]!)
+                const senderObj =
+                  e['sender'] && typeof e['sender'] === 'object'
+                    ? (e['sender'] as Record<string, unknown>)
+                    : undefined
+                const role = String(e['role'] ?? senderObj?.['type'] ?? '')
+                if (/^user$/i.test(role)) continue
+                const rawSeq = e['updatedSeq'] ?? e['updated_seq'] ?? e['seq']
+                let isNewer = false
+                if (rawSeq != null) {
+                  try {
+                    isNewer = BigInt(String(rawSeq)) > baseSeq
+                  } catch {
+                    isNewer = false
+                  }
+                }
+                if (isNewer) {
+                  const candidateText = entryText(e)
+                  if (candidateText) {
+                    reply = candidateText
+                    if (typeof e['entryId'] === 'string') replyMessageId = e['entryId']
+                    else if (typeof e['id'] === 'string') replyMessageId = e['id']
+                    break
+                  }
+                }
+              }
+            }
+            if (!reply && hist && Array.isArray(hist['hydrated'])) {
+              const hydrated = hist['hydrated'] as Array<Record<string, unknown>>
+              const anchorIdx = hydrated.findIndex((item) => item['id'] === messageId)
+              if (anchorIdx >= 0) {
+                for (let j = hydrated.length - 1; j > anchorIdx; j--) {
+                  const item = hydrated[j]!
+                  if (item['role'] === 'bot') {
+                    const t = typeof item['text'] === 'string' ? item['text'].trim() : ''
+                    if (t || Array.isArray(item['widgets']) || Array.isArray(item['media'])) {
+                      reply = t
+                      if (typeof item['id'] === 'string') replyMessageId = item['id']
+                      if (Array.isArray(item['widgets'])) {
+                        replyWidgets = item['widgets'] as IncomingMessage['widgets']
+                      }
+                      if (Array.isArray(item['tools'])) {
+                        replyTools = item['tools'] as IncomingMessage['tools']
+                      }
+                      if (Array.isArray(item['media'])) {
+                        replyMedia = item['media'] as IncomingMessage['media']
+                      }
+                      break
+                    }
+                  }
+                }
+              }
+            }
+            if (reply || replyWidgets?.length || replyMedia?.length) break
+          } catch (pollErr) {
+            if (message.signal?.aborted) throw pollErr
             /* keep polling */
           }
         }
@@ -642,6 +800,10 @@ export class GrokBotAdapter implements PlatformAdapter {
         accountId: message.accountId,
         isTyping: false
       })
+      if (message.signal?.aborted) {
+        this.setStatus(message.accountId, 'online')
+        throw error instanceof AdapterError ? error : new AdapterError('network', 'Aborted')
+      }
       const detail =
         error instanceof GrokConnectError
           ? error.message
@@ -662,10 +824,12 @@ export class GrokBotAdapter implements PlatformAdapter {
     selectedText: string
     optionIndex: number
     sessionId?: string
+    agentId?: string
   }): Promise<void> {
     this.requireAuth(args.accountId)
     const agents = this.agentsByAccount.get(args.accountId) ?? []
-    const agentId = this.agentForConversation.get(args.conversationId) ?? agents[0]?.id
+    const agentId =
+      args.agentId ?? this.getBoundAgentId(args.accountId, args.conversationId) ?? agents[0]?.id
     if (!agentId) throw new AdapterError('unknown-account', 'No Grok Bot agent selected.')
 
     const value = args.widget.optionValues?.[args.optionIndex] ?? args.selectedText
@@ -765,8 +929,39 @@ export class GrokBotAdapter implements PlatformAdapter {
   }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms))
+  if (signal.aborted) return Promise.reject(new AdapterError('network', 'Aborted'))
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(new AdapterError('network', 'Aborted'))
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+function raceWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise
+  if (signal.aborted) return Promise.reject(new AdapterError('network', 'Aborted'))
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new AdapterError('network', 'Aborted'))
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(
+      (val) => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(val)
+      },
+      (err) => {
+        signal.removeEventListener('abort', onAbort)
+        reject(err)
+      }
+    )
+  })
 }
 
 export function createGrokBotAdapter(): GrokBotAdapter {

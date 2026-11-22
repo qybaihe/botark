@@ -32,7 +32,8 @@ const LOGIN_CTA_LABEL: Record<PlatformId, string> = {
   hark: '使用 Hark 登录',
   dot: '使用 ChatGPT Dot 登录',
   hermes: '配置 Hermes 连接',
-  antigravity: '使用 Antigravity 登录'
+  antigravity: '使用 Antigravity 登录',
+  cue: '使用 Cue 登录'
 }
 
 /**
@@ -70,6 +71,8 @@ export function AccountList({ bot, accounts }: AccountListProps) {
         return
       case 'antigravity':
         return void openAntigravityLogin(account.id)
+      case 'cue':
+        return void useBotStore.getState().openCueLogin(account.id)
     }
   }
 
