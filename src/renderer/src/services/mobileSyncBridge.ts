@@ -73,7 +73,9 @@ function buildWorkspaceSnapshot(): MobileWorkspaceSnapshot {
     bots,
     accounts,
     messages,
-    approvals: { ...latestApprovals }
+    approvals: Object.fromEntries(
+      Object.entries(latestApprovals).filter(([accountId]) => Object.hasOwn(accounts, accountId))
+    )
   }
 }
 
@@ -101,6 +103,12 @@ export function startMobileSyncBridge(): () => void {
     }, 180)
   }
 
+  const publishApprovals = (accountId: string, pending: HermesApprovalView[]) => {
+    latestApprovals[accountId] = pending
+    mobileSync.pushEvent({ type: 'approvals', accountId, pending })
+    scheduleSnapshotPush()
+  }
+
   // Push initial snapshot right away so pairing immediately has fresh state
   mobileSync.pushSnapshot(buildWorkspaceSnapshot())
 
@@ -111,6 +119,7 @@ export function startMobileSyncBridge(): () => void {
       state.groups !== prev.groups ||
       state.accounts !== prev.accounts ||
       state.messages !== prev.messages ||
+      state.collapsedGroups !== prev.collapsedGroups ||
       state.selectedBotId !== prev.selectedBotId
     ) {
       scheduleSnapshotPush()
@@ -163,7 +172,7 @@ export function startMobileSyncBridge(): () => void {
         })
         break
       case 'approvals':
-        latestApprovals[event.accountId] = event.pending.map((a) => ({
+        publishApprovals(event.accountId, event.pending.map((a) => ({
           id: a.id,
           status: a.status,
           title: a.title,
@@ -173,12 +182,7 @@ export function startMobileSyncBridge(): () => void {
           decisionOptions: a.decisionOptions,
           reason: a.reason,
           raw: a.raw
-        }))
-        mobileSync.pushEvent({
-          type: 'approvals',
-          accountId: event.accountId,
-          pending: latestApprovals[event.accountId]!
-        })
+        })))
         break
     }
   }
@@ -215,15 +219,16 @@ export function startMobileSyncBridge(): () => void {
         void adapter
           .decideApproval(cmd.accountId, cmd.approvalId, cmd.decision)
           .then(async () => {
-            const refreshed = (await adapter.listApprovals?.(cmd.accountId).catch(() => [])) ?? []
-            latestApprovals[cmd.accountId] = refreshed
-            mobileSync.pushEvent({
-              type: 'approvals',
-              accountId: cmd.accountId,
-              pending: refreshed
-            })
+            const current = latestApprovals[cmd.accountId]
+            const refreshed = await adapter.listApprovals?.(cmd.accountId).catch(() => undefined)
+            // A live update may have arrived while the refresh was in flight.
+            if (latestApprovals[cmd.accountId] !== current) return
+            publishApprovals(cmd.accountId, refreshed ?? (current ?? []).filter((a) => a.id !== cmd.approvalId))
           })
-          .catch(() => undefined)
+          .catch(() => {
+            const current = latestApprovals[cmd.accountId]
+            if (current) publishApprovals(cmd.accountId, current)
+          })
       }
     }
   })
