@@ -29,6 +29,7 @@ beforeEach(() => {
     pushSnapshot: snapshots,
     pushEvent: publishEvent,
     onStateChanged: () => unsubscribe,
+    onSendCommand: () => unsubscribe,
     onCommand: (listener: typeof onCommand) => { onCommand = listener; return unsubscribe }
   } } })
   adapter = new HermesAdapter()
