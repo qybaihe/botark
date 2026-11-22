@@ -239,7 +239,9 @@ export class CueAdapter implements PlatformAdapter {
     const bridge = getBotHubBridge()?.cue
     if (!bridge?.rpc) return this.listCachedAgents(accountId)
     const res = await bridge.rpc({ accountId, op: 'listAgents' })
-    if (!res.ok) return this.listCachedAgents(accountId)
+    if (!res.ok) {
+      throw new AdapterError(res.status === 401 || res.status === 403 ? 'not-connected' : 'network', res.message)
+    }
     const agents = extractCueAgents(res.data)
     this.agentsByAccount.set(accountId, agents)
     return agents
@@ -274,13 +276,14 @@ export class CueAdapter implements PlatformAdapter {
         displayName,
         handle
       })
-      await this.refreshAgents(accountId).catch(() => undefined)
+      await this.refreshAgents(accountId)
       this.setStatus(accountId, 'online')
       return 'online'
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
-      this.setStatus(accountId, 'error', msg)
-      return 'error'
+      const status = error instanceof AdapterError && error.code === 'not-connected' ? 'offline' : 'error'
+      this.setStatus(accountId, status, msg)
+      return status
     }
   }
 
@@ -364,10 +367,33 @@ export class CueAdapter implements PlatformAdapter {
         typeof data['sessionId'] === 'string' && data['sessionId']
           ? data['sessionId']
           : message.sessionId
-      const replyObj =
+      let replyObj =
         data['reply'] && typeof data['reply'] === 'object'
           ? (data['reply'] as Record<string, unknown>)
           : undefined
+      if (data.awaitReply === true && sessionId) {
+        const until = Date.now() + 120_000
+        while (Date.now() < until) {
+          message.signal?.throwIfAborted()
+          const polled = await bridge.rpc({
+            accountId: message.accountId,
+            op: 'watchUntilReply',
+            sessionId,
+            afterMessageId: typeof data.afterMessageId === 'string' ? data.afterMessageId : undefined,
+            expectedUserText: message.text
+          })
+          message.signal?.throwIfAborted()
+          if (!polled.ok) {
+            throw new AdapterError(polled.status === 401 || polled.status === 403 ? 'not-connected' : 'network', polled.message)
+          }
+          const result = polled.data as { done?: boolean; reply?: Record<string, unknown> } | null
+          if (result?.done) {
+            replyObj = result.reply
+            break
+          }
+          await new Promise((resolve) => setTimeout(resolve, 2500))
+        }
+      }
       const replyText =
         typeof replyObj?.['text'] === 'string'
           ? replyObj['text']

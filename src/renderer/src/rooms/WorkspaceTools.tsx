@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  AlertTriangle,
   CheckCircle2,
   ClipboardPaste,
   Code2,
@@ -13,7 +12,6 @@ import {
   Play,
   Plus,
   RotateCw,
-  Sparkles,
   Trash2,
   Unlink,
   X
@@ -587,7 +585,7 @@ function WorkspaceStudioBody({
   const L = (zh: string, en: string) => (locale === 'en' ? en : zh)
 
   const bridge = getBridge()?.workspace
-  const [tab, setTab] = useState<StudioTab>(() => (state?.directory ? 'file' : 'mcp'))
+  const [tab, setTab] = useState<StudioTab>('file')
   const hasUserSwitchedTabRef = useRef(false)
   const [path, setPath] = useState('.')
   const [range, setRange] = useState('')
@@ -611,7 +609,7 @@ function WorkspaceStudioBody({
 
   useEffect(() => {
     if (!hasUserSwitchedTabRef.current && state) {
-      setTab(state.directory ? 'file' : 'mcp')
+      setTab('file')
     }
   }, [state])
 
@@ -676,7 +674,9 @@ function WorkspaceStudioBody({
   const handleBind = () =>
     manage({ op: 'bind' }, (next) => {
       if (next.canceled || !next.directory) return
-      setHint(L(`已绑定工作区：${next.directory}`, `Workspace bound: ${next.directory}`))
+      setTab('file')
+      setHint(L('工作区已就绪，可以开始对话。', 'Workspace ready. You can start chatting.'))
+      onClose?.()
     })
 
   const handleImportFile = () =>
@@ -699,26 +699,6 @@ function WorkspaceStudioBody({
       setHint(L('已将工作区接入 Hermes', 'Connected workspace to Hermes'))
     })
   }
-
-  const handleOptimizeReady = () =>
-    manage(
-      {
-        op: 'optimizeReady',
-        autoStart: true,
-        includeUserConfigs: true,
-        bindIfMissing: true
-      },
-      (next) => {
-        if (next.canceled) return
-        if (next.lastReport) {
-          setHint(next.lastReport.summary)
-          if (next.lastReport.importedServers.length > 0 || next.lastReport.failedServers.length > 0) {
-            hasUserSwitchedTabRef.current = true
-            setTab('mcp')
-          }
-        }
-      }
-    )
 
   const handleSaveServer = async (
     payload: McpServerConfigInput,
@@ -849,11 +829,6 @@ function WorkspaceStudioBody({
 
   const servers = state?.servers ?? []
   const runningCount = servers.filter((s) => s.running).length
-  const totalTools = state?.tools.length ?? 0
-  const detectedConfigs = state?.detectedConfigs ?? []
-  const newDetectedCount = detectedConfigs.reduce((acc, c) => acc + c.newServerNames.length, 0)
-  const report = state?.lastReport
-  const isReady = Boolean(state?.directory && (report?.ready ?? (newDetectedCount === 0 && !servers.some((s) => s.lastError))))
 
   return (
     <div className="flex flex-col gap-2.5">
@@ -862,7 +837,7 @@ function WorkspaceStudioBody({
           <div className="flex items-center gap-2">
             <ArkWorkspaceVaultSvg active={Boolean(state?.directory) || runningCount > 0} className="size-4 text-accent-600" />
             <span className="text-[13px] font-semibold tracking-tight text-ink">
-              {L('本地工作区与 MCP', 'Workspace & MCP')}
+              {L('本地工作区', 'Local Workspace')}
             </span>
           </div>
           <IconButton label={L('关闭', 'Close')} onClick={onClose} className="-mr-1 size-7">
@@ -912,138 +887,20 @@ function WorkspaceStudioBody({
               </div>
             </div>
 
-            {/* One-Click Optimize & Ready Card */}
-            <div className="flex flex-col gap-2 rounded-lg border border-line bg-surface/90 p-2">
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[11.5px] font-semibold text-ink">
-                    {L('工作区就绪检查', 'Workspace Readiness')}
-                  </span>
-                  <span
-                    className={cn(
-                      'rounded-full px-1.5 py-0.5 text-[10px] font-medium',
-                      isReady
-                        ? 'bg-status-online/12 text-status-online-ink'
-                        : 'bg-status-attention/12 text-status-attention-ink'
-                    )}
-                  >
-                    {isReady ? L('已就绪', 'Ready') : L('待完善', 'Needs Setup')}
-                  </span>
-                </div>
-                <Button
-                  size="sm"
-                  variant="primary"
-                  disabled={busy}
-                  onClick={() => void handleOptimizeReady()}
-                  className="h-6.5 px-2.5 text-[11px]"
-                >
-                  {busy ? <Loader2 className="size-3 animate-spin" /> : <Sparkles className="size-3" />}
-                  {report?.ready ? L('重新优化', 'Re-optimize') : L('一键优化并就绪', 'Optimize & Ready')}
-                </Button>
-              </div>
-
-              {detectedConfigs.length > 0 && (
-                <div className="flex flex-wrap items-center gap-1">
-                  {detectedConfigs.map((cfg) => (
-                    <span
-                      key={cfg.path}
-                      title={cfg.parseError ?? cfg.serverNames.join(', ')}
-                      className={cn(
-                        'rounded-md px-1.5 py-0.5 font-mono text-[10px]',
-                        cfg.parseError
-                          ? 'bg-status-error/10 text-status-error-ink'
-                          : cfg.newServerNames.length > 0
-                            ? 'bg-accent-50 text-accent-600'
-                            : 'bg-hover text-ink-secondary'
-                      )}
-                    >
-                      {cfg.label} ({cfg.parseError ? '!' : cfg.serverCount})
-                    </span>
-                  ))}
-                </div>
-              )}
-
-              <ul className="grid grid-cols-2 gap-x-2 gap-y-1 text-[10.5px] text-ink-secondary">
-                <li className="flex items-center gap-1 truncate">
-                  <CheckCircle2 className="size-3 shrink-0 text-status-online" />
-                  <span className="truncate">{L('目录已信任 (realpath)', 'Directory trusted')}</span>
-                </li>
-                <li className="flex items-center gap-1 truncate">
-                  <CheckCircle2
-                    className={cn(
-                      'size-3 shrink-0',
-                      newDetectedCount > 0 ? 'text-status-attention' : 'text-status-online'
-                    )}
-                  />
-                  <span className="truncate">
-                    {newDetectedCount > 0
-                      ? L(`待导入 ${newDetectedCount} 个配置`, `${newDetectedCount} pending`)
-                      : L(`配置已同步 (${servers.length})`, `Synced (${servers.length})`)}
-                  </span>
-                </li>
-                <li className="flex items-center gap-1 truncate">
-                  {servers.some((s) => s.lastError) ? (
-                    <AlertTriangle className="size-3 shrink-0 text-status-error" />
-                  ) : (
-                    <CheckCircle2 className="size-3 shrink-0 text-status-online" />
-                  )}
-                  <span className="truncate">
-                    {servers.length > 0
-                      ? L(`MCP ${runningCount}/${servers.length} 运行中`, `MCP ${runningCount}/${servers.length} running`)
-                      : L('内置文件工具就绪', 'Built-in tools ready')}
-                  </span>
-                </li>
-                <li className="flex items-center gap-1 truncate">
-                  <CheckCircle2 className="size-3 shrink-0 text-status-online" />
-                  <span className="truncate">{L(`共 ${totalTools} 个可用工具`, `${totalTools} tools ready`)}</span>
-                </li>
-              </ul>
-
-              {report && (
-                <div className="flex items-center justify-between gap-2 border-t border-line pt-1.5 text-[10.5px] text-ink-secondary">
-                  <span className="truncate" title={report.summary}>
-                    {report.summary}
-                  </span>
-                  {onClose && report.ready && (
-                    <button
-                      type="button"
-                      onClick={onClose}
-                      className="shrink-0 font-medium text-accent-600 hover:underline"
-                    >
-                      {L('开始工作', 'Start')}
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
+            <p className="flex items-center gap-1.5 text-[11px] text-ink-secondary">
+              <CheckCircle2 className="size-3 text-status-online" />
+              {L('工作区已就绪，可以开始对话。', 'Workspace ready. You can start chatting.')}
+            </p>
           </div>
         ) : (
-          <div className="flex flex-col gap-2">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-[12px] text-ink-secondary">
-                {L('MCP 可直接使用；绑定目录可解锁文件工具与自动发现', 'MCP works standalone; bind a folder for files & auto-discovery')}
-              </span>
-            </div>
-            <div className="flex flex-wrap items-center gap-1.5">
-              <Button
-                size="sm"
-                variant="secondary"
-                disabled={busy}
-                onClick={() => void handleBind()}
-              >
-                <FolderOpen className="size-3.5" />
-                {L('选择目录', 'Choose Folder')}
-              </Button>
-              <Button
-                size="sm"
-                variant="primary"
-                disabled={busy}
-                onClick={() => void handleOptimizeReady()}
-              >
-                {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Sparkles className="size-3.5" />}
-                {L('选目录并一键就绪', 'Pick & Optimize Ready')}
-              </Button>
-            </div>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-[12px] text-ink-secondary">
+              {L('选择项目目录，就可以在群聊中使用文件工具。', 'Choose a project folder to use file tools in this room.')}
+            </span>
+            <Button size="sm" variant="primary" disabled={busy} onClick={() => void handleBind()}>
+              {busy ? <Loader2 className="size-3.5 animate-spin" /> : <FolderOpen className="size-3.5" />}
+              {L('选择目录', 'Choose Folder')}
+            </Button>
           </div>
         )}
       </div>
@@ -1549,7 +1406,7 @@ export function WorkspaceTools({
       )
     : runningCount > 0
       ? L(`MCP：${runningCount}/${totalCount} 运行中`, `MCP: ${runningCount}/${totalCount} running`)
-      : L('本地工作区与 MCP', 'Local Workspace & MCP')
+      : L('本地工作区', 'Local Workspace')
 
   return (
     <>
@@ -1557,7 +1414,7 @@ export function WorkspaceTools({
         ref={triggerRef}
         type="button"
         aria-expanded={open}
-        aria-label={L('本地工作区与 MCP', 'Local Workspace & MCP')}
+        aria-label={L('本地工作区', 'Local Workspace')}
         title={triggerTitle}
         onClick={() => setOpen((v) => !v)}
         className={cn(

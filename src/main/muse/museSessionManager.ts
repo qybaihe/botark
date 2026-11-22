@@ -933,6 +933,11 @@ export class MuseSessionManager {
       return fetchViaSession(trimmed)
     }
 
+    if (!this.native.peek(accountId) && !(await this.hasSessionCookie(accountId))) {
+      if (isHttpUrl) return fetchViaSession(trimmed)
+      throw new Error('Muse account is not signed in')
+    }
+
     await this.ensure('muse', accountId)
     const client = this.native.get(accountId)
     if (!client) {

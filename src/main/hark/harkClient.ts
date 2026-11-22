@@ -176,6 +176,7 @@ async function harkFetch(
     query?: Record<string, string | undefined>
     body?: unknown
     signal?: AbortSignal
+    interactive?: boolean
   } = {}
 ): Promise<unknown> {
   const url = new URL(path.startsWith('http') ? path : `${HARK_API_BASE}${path}`)
@@ -189,7 +190,7 @@ async function harkFetch(
     init.body !== undefined ? { 'Content-Type': 'application/json' } : undefined
   )
   const method = init.method ?? (init.body !== undefined ? 'POST' : 'GET')
-  const maxAttempts = method === 'GET' ? 3 : 1
+  const maxAttempts = method === 'GET' ? (init.interactive ? 2 : 3) : 1
   let lastErr: unknown
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -198,11 +199,12 @@ async function harkFetch(
     }
     // Every attempt gets its own deadline; a stalled request used to leave
     // the bubble on "Sending" and the account `pending` until restart.
-    const deadline = AbortSignal.timeout(HARK_REQUEST_TIMEOUT_MS)
+    const deadline = AbortSignal.timeout(init.interactive ? 12000 : HARK_REQUEST_TIMEOUT_MS)
     const signal = init.signal ? AbortSignal.any([init.signal, deadline]) : deadline
     try {
       const response = await ses.fetch(url.toString(), {
         method,
+        credentials: 'include',
         headers,
         body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
         signal
@@ -260,8 +262,11 @@ export async function callHarkApi(
 
 export async function getAuthSession(accountId: string): Promise<HarkAuthSession> {
   const ses = await preparedSessionForAccount(accountId)
-  const data = await harkFetch(ses, '/auth/get-session')
-  if (data == null || typeof data !== 'object') return null
+  const data = await harkFetch(ses, '/auth/get-session', { interactive: true })
+  if (data == null) return null
+  if (typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error('Hark returned an invalid session response')
+  }
   const rec = data as Record<string, unknown>
   if (rec['user'] || rec['session']) {
     return data as HarkAuthSession
@@ -435,8 +440,8 @@ export async function fetchConversationSnapshotMessages(
   return snap.messages
 }
 
-export async function getProfile(accountId: string): Promise<unknown> {
-  return harkFetch(await preparedSessionForAccount(accountId), '/profile')
+export async function getProfile(accountId: string, interactive = false): Promise<unknown> {
+  return harkFetch(await preparedSessionForAccount(accountId), '/profile', { interactive })
 }
 
 export async function listConversations(accountId: string): Promise<unknown> {
@@ -1450,7 +1455,7 @@ export async function readHarkStream(
 ): Promise<void> {
   const url = new URL(HARK_API_BASE + '/sync/conversation')
   url.search = new URLSearchParams({ conversationId, manager, dial, v: '2', mode: 'in_tab', ids: '1', beat: '5' }).toString()
-  const response = await ses.fetch(url.toString(), { signal, headers: harkClientHeaders({
+  const response = await ses.fetch(url.toString(), { credentials: 'include', signal, headers: harkClientHeaders({
     Accept: 'text/event-stream', 'Cache-Control': 'no-cache'
   }) })
   if (!response.ok || !response.body || !response.headers.get('content-type')?.includes('text/event-stream')) {

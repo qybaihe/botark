@@ -220,7 +220,7 @@ describe('Tier 3: Cross-Feature Pairwise Integration', () => {
     expect(msgs.some((m) => m.author === 'Tool' && m.text.includes('stdio:from-t3'))).toBe(true)
   })
 
-  it('E2E-T3-04: stopRoom AbortSignal + moveMemberToRoom + removeMember Min-2 Guard', async (ctx) => {
+  it('E2E-T3-04: stopRoom AbortSignal + moveMemberToRoom + removeMember Last-Member Guard', async (ctx) => {
     const storeMod = await import('@/rooms/roomStore')
     const removeMember = (storeMod as Record<string, unknown>).removeMember as
       | ((r: string, b: string) => { ok: boolean })
@@ -275,7 +275,8 @@ describe('Tier 3: Cross-Feature Pairwise Integration', () => {
     await running
 
     expect(moveMemberToRoom!(roomA.id, 'CueA', roomB.id).ok).toBe(true)
-    expect(removeMember!(roomA.id, 'Dot').ok).toBe(false)
+    expect(removeMember!(roomA.id, 'Dot').ok).toBe(true)
+    expect(useRooms.getState().rooms.find((r) => r.id === roomA.id)?.members).toHaveLength(1)
     await submitBrief(roomB.id, '@CueA verify')
     expect(useRooms.getState().rooms.find((r) => r.id === roomB.id)?.finalId).toBeDefined()
   })

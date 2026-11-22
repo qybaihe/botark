@@ -20,7 +20,7 @@ import {
 } from './cueAuthStore'
 import { getOrCreateCueDeviceId } from './cueDeviceId'
 
-export const CUE_ORIGIN = 'https://app.cue.im'
+export const CUE_ORIGIN = 'https://cue.im'
 export const CUE_WEB_ORIGIN = 'https://cue.im'
 export const CUE_CONNECT_BASE = 'https://api.manus.im'
 export const CUE_MANUS_API_BASE = 'https://api.manus.ai/v2'
@@ -99,7 +99,7 @@ export function cueFetcherForAccount(
   }
 }
 
-function decodeJwtClaims(token: string): {
+export function decodeJwtClaims(token: string): {
   handle?: string
   displayName?: string
   expiresAtMs?: number
@@ -372,18 +372,28 @@ export async function persistCueTokens(
     }
     setCueMainAuth(auth)
 
-    if (tokens.cookies?.length) {
+    if (tokens.cookies?.length || tokens.accessToken) {
       try {
         const ses = electronSession.fromPartition(partitionForAccount(accountId))
-        for (const c of tokens.cookies) {
+        const cookiesToSet = tokens.cookies?.length
+          ? tokens.cookies
+          : tokens.accessToken
+            ? [
+                { name: 'cue_session_id', value: tokens.accessToken, domain: '.cue.im', path: '/' },
+                { name: 'session_id', value: tokens.accessToken, domain: '.manus.im', path: '/' }
+              ]
+            : []
+        for (const c of cookiesToSet) {
+          const domain = c.domain || '.cue.im'
+          const url = domain.includes('manus.im') ? 'https://manus.im' : CUE_ORIGIN
           await ses.cookies.set({
-            url: CUE_ORIGIN,
+            url,
             name: c.name,
             value: c.value,
-            domain: c.domain || '.cue.im',
+            domain,
             path: c.path || '/',
             secure: true,
-            httpOnly: true
+            httpOnly: false
           })
         }
         await ses.cookies.flushStore().catch(() => undefined)

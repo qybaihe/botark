@@ -3,7 +3,7 @@
  * Persist via Electron safeStorage; apply to session partition + Noise WSS agent.
  */
 import { join } from "node:path"
-import { app, safeStorage, session as electronSession } from "electron"
+import { app, safeStorage, session as electronSession, type Session } from "electron"
 import { HttpsProxyAgent } from "https-proxy-agent"
 import { SocksProxyAgent } from "socks-proxy-agent"
 import type { Agent } from "node:https"
@@ -287,39 +287,41 @@ async function closePartitionConnections(ses: Electron.Session): Promise<void> {
   }
 }
 
+const partitionProxies = new WeakMap<Session, {
+  lock: ReturnType<typeof createMutex>
+  applied?: string | null
+}>()
+
 export async function applyProxyToPartition(accountId: string, cfg?: MuseProxyConfig): Promise<void> {
   const ses = electronSession.fromPartition(partitionForAccount(accountId))
-  let c: MuseProxyConfig
-  try {
-    c = cfg ?? (await loadProxyConfig(accountId))
-  } catch (err) {
-    // Fail closed: an unreadable proxy must not turn into the real IP.
-    await ses.setProxy({ proxyRules: BLOCKING_PROXY_RULE, proxyBypassRules: "" })
-    await closePartitionConnections(ses)
-    throw err
+  let state = partitionProxies.get(ses)
+  if (!state) {
+    state = { lock: createMutex() }
+    partitionProxies.set(ses, state)
   }
-  if (c.mode === "direct") {
-    // Respect OS system proxy (e.g. Clash / Surge on 127.0.0.1) when no per-account proxy is set.
-    await ses.setProxy({ mode: "system" })
-    await closePartitionConnections(ses)
-    return
-  }
-  let proxyRules: string | null
-  try {
-    proxyRules = await resolvePartitionProxyRules(c)
-  } catch (err) {
-    await ses.setProxy({ proxyRules: BLOCKING_PROXY_RULE, proxyBypassRules: "" })
-    await closePartitionConnections(ses)
-    throw err
-  }
-  if (!proxyRules) {
-    await ses.setProxy({ mode: "system" })
-    await closePartitionConnections(ses)
-    return
-  }
-  // Electron honors proxyRules for partition fetch + WebContents login window.
-  await ses.setProxy({ proxyRules, proxyBypassRules: "<local>" })
-  await closePartitionConnections(ses)
+  const proxyState = state
+  await proxyState.lock(async () => {
+    const applyRules = async (rules: string | null): Promise<void> => {
+      // Setting unchanged rules and closing the session would abort concurrent
+      // requests and Hark's live response stream on this same partition.
+      if (proxyState.applied === rules) return
+      await ses.setProxy(rules
+        ? { proxyRules: rules, proxyBypassRules: rules === BLOCKING_PROXY_RULE ? "" : "<local>" }
+        : { mode: "system" })
+      await closePartitionConnections(ses)
+      proxyState.applied = rules
+    }
+
+    let rules: string | null
+    try {
+      rules = await resolvePartitionProxyRules(cfg ?? await loadProxyConfig(accountId))
+    } catch (error) {
+      // An unreadable or unusable configured proxy must not fall back to direct.
+      await applyRules(BLOCKING_PROXY_RULE)
+      throw error
+    }
+    await applyRules(rules)
+  })
 }
 
 /** Node `ws` / HTTPS agent for Noise WSS (session.setProxy does not cover Node ws). */

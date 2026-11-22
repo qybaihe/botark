@@ -1,6 +1,6 @@
 import { belongsToSelectedSession } from './sessionEvents'
 import { adapterRegistry } from '@adapters/registry'
-import type { AdapterEvent, AttachmentMeta } from '@adapters/types'
+import type { AdapterEvent, AttachmentMeta, PlatformId } from '@adapters/types'
 import type { HermesApprovalView, MuseMediaPartView } from '@shared/ipc'
 import type {
   MobileSyncedAccount,
@@ -12,13 +12,21 @@ import { getBridge } from '@/lib/bridge'
 import { useBotStore } from '@/store/botStore'
 
 const MAX_MESSAGES_PER_BOT = 60
-const MAX_MEDIA_CACHE_ENTRIES = 96
+const MAX_MEDIA_CACHE_ENTRIES = 512
 const MAX_MOBILE_IMAGE_BYTES = 6 * 1024 * 1024
 const MAX_MOBILE_VIDEO_BYTES = 8 * 1024 * 1024
 
 const latestApprovals: Record<string, HermesApprovalView[]> = {}
 const resolvedMediaCache = new Map<string, MuseMediaPartView>()
 const pendingMediaResolves = new Set<string>()
+const failedMediaResolves = new Set<string>()
+
+function clearFailedMediaForAccount(accountId: string): void {
+  const prefix = `${accountId}::`
+  for (const key of failedMediaResolves) {
+    if (key.startsWith(prefix)) failedMediaResolves.delete(key)
+  }
+}
 
 function rememberResolvedMedia(key: string, part: MuseMediaPartView): void {
   if (resolvedMediaCache.has(key)) resolvedMediaCache.delete(key)
@@ -27,6 +35,7 @@ function rememberResolvedMedia(key: string, part: MuseMediaPartView): void {
     const oldest = resolvedMediaCache.keys().next().value
     if (!oldest) break
     resolvedMediaCache.delete(oldest)
+    failedMediaResolves.add(oldest)
   }
 }
 
@@ -90,12 +99,23 @@ function resolveMediaForMobile(
     combined.push(part)
 
     const muse = getBridge()?.muse
-    if (accountId && muse?.previewWorkspaceFile && !pendingMediaResolves.has(cacheKey)) {
+    const ownerPlatform = accountId ? useBotStore.getState().accounts[accountId]?.platformId : undefined
+    const isMuseAccount = !ownerPlatform || ownerPlatform === 'meta-muse'
+    if (
+      accountId &&
+      isMuseAccount &&
+      muse?.previewWorkspaceFile &&
+      !pendingMediaResolves.has(cacheKey) &&
+      !failedMediaResolves.has(cacheKey)
+    ) {
       pendingMediaResolves.add(cacheKey)
       void muse
         .previewWorkspaceFile(accountId, part.path)
         .then((res) => {
-          if (!res?.dataBase64) return
+          if (!res?.dataBase64) {
+            failedMediaResolves.add(cacheKey)
+            return
+          }
           const mime = res.mimeType || part.mimeType || 'application/octet-stream'
           if (mime.startsWith('image/') && res.byteLength <= MAX_MOBILE_IMAGE_BYTES) {
             rememberResolvedMedia(cacheKey, {
@@ -115,9 +135,13 @@ function resolveMediaForMobile(
               mimeType: mime
             })
             onResolved?.()
+          } else {
+            failedMediaResolves.add(cacheKey)
           }
         })
-        .catch(() => undefined)
+        .catch(() => {
+          failedMediaResolves.add(cacheKey)
+        })
         .finally(() => {
           pendingMediaResolves.delete(cacheKey)
         })
@@ -240,8 +264,18 @@ export function startMobileSyncBridge(): () => void {
   })
 
   // Forward real-time streaming deltas, typing, status, and approvals immediately
-  const handleAdapterEvent = (event: AdapterEvent) => {
-    if (!belongsToSelectedSession(event, useBotStore.getState().bots)) return
+  const handleAdapterEvent = (platformId: PlatformId, event: AdapterEvent) => {
+    const store = useBotStore.getState()
+    const accountId = event.type === 'message' ? event.message.accountId : event.accountId
+    const account = store.accounts[accountId]
+    if (account && account.platformId !== platformId) return
+    if (!belongsToSelectedSession(event, store.bots)) return
+    if (
+      (event.type === 'status' && event.status === 'online') ||
+      (event.type === 'login' && event.signedIn)
+    ) {
+      clearFailedMediaForAccount(event.accountId)
+    }
     switch (event.type) {
       case 'message_delta':
         mobileSync.pushEvent({
@@ -309,7 +343,9 @@ export function startMobileSyncBridge(): () => void {
     }
   }
 
-  const adapterUnsubs = adapterRegistry.list().map((adapter) => adapter.subscribe(handleAdapterEvent))
+  const adapterUnsubs = adapterRegistry.list().map((adapter) =>
+    adapter.subscribe((event) => handleAdapterEvent(adapter.id, event))
+  )
 
   const unsubscribeSend = mobileSync.onSendCommand((cmd) => {
     const result = useBotStore.getState().queueMobileMessage(cmd)

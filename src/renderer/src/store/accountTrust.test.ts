@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { adapterRegistry } from '@adapters/registry'
-import type { PlatformAdapter } from '@adapters/types'
+import type { AdapterEvent, PlatformAdapter } from '@adapters/types'
+import { startAdapterBridge } from '@/services/adapterBridge'
 import { useBotStore } from '@/store/botStore'
 import type { Bot } from '@/types'
 
@@ -82,6 +83,42 @@ describe('Account status sync (Qoder-2x / Hark-*) & per-bot WebSession view pinn
       { id: 'h1', role: 'assistant', content: '外科护理学那篇引的 ESPEN 指南已更新', createdAt: Date.now() }
     ])
     expect(useBotStore.getState().accounts.acc_hark_sci?.status).toBe('online')
+  })
+
+  it('ignores another platform status event for a connected Hark account', () => {
+    let museEvent: ((event: AdapterEvent) => void) | undefined
+    const adapter = {
+      id: 'meta-muse',
+      subscribe: (listener: (event: AdapterEvent) => void) => {
+        museEvent = listener
+        return () => {}
+      }
+    } as PlatformAdapter
+    const list = vi.spyOn(adapterRegistry, 'list').mockReturnValue([adapter])
+    const stop = startAdapterBridge()
+    try {
+      useBotStore.getState().setAccountStatus('acc_qoder_2x', 'online')
+      museEvent?.({ type: 'status', accountId: 'acc_qoder_2x', status: 'offline', detail: 'Muse preview unauthorized' })
+      expect(useBotStore.getState().accounts.acc_qoder_2x?.status).toBe('online')
+    } finally {
+      stop()
+      list.mockRestore()
+    }
+  })
+
+  it('uses successfully refreshed Hark history as a live signal even for an empty session', () => {
+    useBotStore.getState().applyHarkHistory('bot_hark_sci', 'acc_hark_sci', 'conv_sci_1', [])
+    expect(useBotStore.getState().accounts.acc_hark_sci?.status).toBe('online')
+    expect(useBotStore.getState().accounts.acc_qoder_2x?.status).toBe('offline')
+  })
+
+  it('restores the selected Bot view when rehydrating after a reload', () => {
+    const current = useBotStore.getState()
+    const restored = useBotStore.persist.getOptions().merge?.({
+      selectedBotId: 'bot_qoder_2x',
+      webSessionByBot: { bot_qoder_2x: true }
+    }, current)
+    expect(restored?.webSessionOpen).toBe(true)
   })
 
   it('pins and restores per-bot WebSession view choice when switching between bots and auto-connects offline accounts', async () => {

@@ -20,7 +20,15 @@ vi.mock('electron', () => ({
       return { result: s.slice(3), shouldReEncrypt: false }
     }
   },
-  session: { fromPartition: () => ({ setProxy, closeAllConnections }) }
+  session: {
+    fromPartition: (() => {
+      const sessions = new Map<string, { setProxy: typeof setProxy; closeAllConnections: typeof closeAllConnections }>()
+      return (partition: string) => {
+        if (!sessions.has(partition)) sessions.set(partition, { setProxy, closeAllConnections })
+        return sessions.get(partition)
+      }
+    })()
+  }
 }))
 vi.mock('../webContentsViewManager', () => ({ partitionForAccount: (id: string) => `persist:test-${id}` }))
 
@@ -47,6 +55,20 @@ beforeEach(() => {
 })
 
 describe('account proxy fails closed', () => {
+  it('does not close active connections on repeated or concurrent proxy preparation', async () => {
+    const accountId = 'concurrent-hark-requests'
+    await Promise.all([applyProxyToPartition(accountId), applyProxyToPartition(accountId)])
+    expect(setProxy).toHaveBeenCalledTimes(1)
+    expect(closeAllConnections).toHaveBeenCalledTimes(1)
+
+    await applyProxyToPartition(accountId)
+    expect(closeAllConnections).toHaveBeenCalledTimes(1)
+
+    await applyProxyToPartition(accountId, { mode: 'socks5', host: '127.0.0.1', port: 1080 })
+    expect(setProxy).toHaveBeenLastCalledWith(expect.objectContaining({ proxyRules: 'socks5://127.0.0.1:1080' }))
+    expect(closeAllConnections).toHaveBeenCalledTimes(2)
+  })
+
   it('does not report direct when a stored proxy cannot be decrypted', async () => {
     await expect(loadProxyConfig('acc1')).rejects.toBeInstanceOf(ProxyConfigUnreadableError)
     encryptionAvailable = false

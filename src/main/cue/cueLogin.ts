@@ -17,7 +17,7 @@ import {
 import { applyProxyToPartition } from '../muse/accountProxy'
 import { partitionForAccount } from '../webContentsViewManager'
 import {
-  CUE_ORIGIN,
+  decodeJwtClaims,
   hasValidCueAuth,
   looksLikeCueSessionCookie,
   persistCueTokens
@@ -75,22 +75,83 @@ function hostAllowed(url: string): boolean {
   }
 }
 
-async function tryCapturePartitionCookies(accountId: string): Promise<boolean> {
+export async function tryCapturePartitionCookies(
+  accountId: string,
+  wc?: WebContents
+): Promise<{
+  captured: boolean
+  handle?: string
+  displayName?: string
+  accountSlot?: string
+}> {
   try {
     const ses = electronSession.fromPartition(partitionForAccount(accountId))
     const cookies = await ses.cookies.get({})
     const sessionCookies = cookies.filter((c) => looksLikeCueSessionCookie(c.name) && Boolean(c.value))
-    if (sessionCookies.length === 0) return false
-    const primary = sessionCookies[0]!
-    await persistCueTokens(accountId, {
+    if (sessionCookies.length === 0) return { captured: false }
+    const primary =
+      sessionCookies.find((c) => c.name === 'cue_session_id' || c.name === 'session_id') ??
+      sessionCookies[0]!
+    const jwtClaims = decodeJwtClaims(primary.value)
+    let handle = jwtClaims.handle
+    let displayName = jwtClaims.displayName
+    let accountSlot = jwtClaims.handle
+
+    if (wc && !wc.isDestroyed()) {
+      try {
+        const rawUser = await wc.executeJavaScript(
+          `(() => { try { return localStorage.getItem('UserService.userInfo') || ''; } catch { return ''; } })()`,
+          true
+        )
+        if (typeof rawUser === 'string' && rawUser.trim().startsWith('{')) {
+          const parsed = JSON.parse(rawUser) as Record<string, unknown>
+          const u =
+            parsed['value'] && typeof parsed['value'] === 'object'
+              ? (parsed['value'] as Record<string, unknown>)
+              : parsed
+          const email = typeof u['email'] === 'string' && u['email'].trim() ? u['email'].trim() : undefined
+          const name =
+            (typeof u['name'] === 'string' && u['name'].trim()) ||
+            (typeof u['nickname'] === 'string' && u['nickname'].trim()) ||
+            undefined
+          const uid =
+            (typeof u['clientUserId'] === 'string' && u['clientUserId'].trim()) ||
+            (typeof u['userId'] === 'string' && u['userId'].trim()) ||
+            (typeof u['id'] === 'string' && u['id'].trim()) ||
+            undefined
+          handle = email || handle || uid
+          displayName = name || displayName || (email ? email.split('@')[0] : undefined)
+          accountSlot = uid || email || accountSlot
+        }
+      } catch {
+        /* ignore cross-origin or transient frame state */
+      }
+    }
+
+    const auth = await persistCueTokens(accountId, {
       accessToken: primary.value,
       cookieHeader: sessionCookies.map((c) => `${c.name}=${c.value}`).join('; '),
       cookieNames: sessionCookies.map((c) => c.name),
+      cookies: sessionCookies.map((c) => ({
+        name: c.name,
+        value: c.value,
+        domain: c.domain || '.cue.im',
+        path: c.path || '/'
+      })),
+      handle,
+      displayName,
+      accountSlot,
+      expiresAtMs: jwtClaims.expiresAtMs,
       authKind: 'session'
     })
-    return true
+    return {
+      captured: true,
+      handle: auth.handle,
+      displayName: auth.displayName,
+      accountSlot: auth.accountSlot
+    }
   } catch {
-    return false
+    return { captured: false }
   }
 }
 
@@ -153,12 +214,18 @@ export async function openCueLoginWindow(
   let settling = false
   let handedOffToBrowser = false
 
-  const finishIfCaptured = async (): Promise<void> => {
+  const finishIfCaptured = async (wc?: WebContents): Promise<void> => {
     if (settling || win.isDestroyed()) return
-    const captured = await tryCapturePartitionCookies(accountId)
-    if (!captured) return
+    const res = await tryCapturePartitionCookies(accountId, wc ?? win.webContents)
+    if (!res.captured) return
     settling = true
-    emitLogin({ accountId, signedIn: true })
+    emitLogin({
+      accountId,
+      signedIn: true,
+      handle: res.handle,
+      displayName: res.displayName,
+      accountSlot: res.accountSlot
+    })
     closeChildPopups()
     try {
       if (!win.isDestroyed()) win.close()
@@ -180,7 +247,7 @@ export async function openCueLoginWindow(
       await wc.executeJavaScript(
         buildGoogleFallbackBannerScript({
           title: 'Google 登录受限或需要通行密钥',
-          detail: '已在系统浏览器打开 Cue 登录页，完成后可回到 BotArk 粘贴凭据或 API Key 导入。',
+          detail: '已在系统浏览器打开 Cue 登录页，完成后可回到 BotArk 使用「粘贴凭据导入」。',
           buttonLabel: '在系统浏览器打开',
           actionUrl: 'botark-external://open'
         }),
@@ -235,7 +302,7 @@ export async function openCueLoginWindow(
   attachNavigationGuards(win.webContents, win)
 
   const onNav = (wc: WebContents) => {
-    void finishIfCaptured()
+    void finishIfCaptured(wc)
     void maybeFallbackOnGoogleBlock(wc)
   }
 
@@ -280,7 +347,7 @@ export async function openCueLoginWindow(
   })
 
   try {
-    await win.loadURL(CUE_ORIGIN)
+    await win.loadURL(CUE_LOGIN_URL)
   } catch {
     /* ignore navigation abort in test/mock environments */
   }

@@ -99,7 +99,7 @@ export const PLATFORM_INSPECTORS: Record<PlatformId, PlatformInspectorSpec> = {
   cue: {
     platformId: 'cue',
     displayName: 'Cue',
-    protocolLabel: 'Connect-RPC · Manus Cloud',
+    protocolLabel: 'Web Session · Manus Cloud',
     supportsWebSession: true,
     supportsQuickNewConversation: true,
     tabs: [

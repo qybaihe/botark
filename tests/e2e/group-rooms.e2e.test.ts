@@ -548,7 +548,7 @@ describe('Area 3: Group Creation, Conversation & Single-Bot Remove/Move', () => 
     expect(acc?.botId).toBe('stable-1to1-bot')
   })
 
-  it('E2E-T2-A3-03: removeMember Min-2 Member Guard', async (ctx) => {
+  it('E2E-T2-A3-03: removeMember Last Member Guard', async (ctx) => {
     const storeMod = await import('@/rooms/roomStore')
     const removeMember =
       ((storeMod as Record<string, unknown>).removeMember as
@@ -565,10 +565,9 @@ describe('Area 3: Group Creation, Conversation & Single-Bot Remove/Move', () => 
     })
 
     const r2 = addRoom('Two', ['A', 'B'], 'auto', 4)
-    const deny = removeMember!(r2.id, 'A')
-    expect(deny.ok).toBe(false)
-    expect(deny.error).toBeTruthy()
-    expect(useRooms.getState().rooms.find((r) => r.id === r2.id)?.members).toHaveLength(2)
+    expect(removeMember!(r2.id, 'A').ok).toBe(true)
+    expect(removeMember!(r2.id, 'B').ok).toBe(false)
+    expect(useRooms.getState().rooms.find((r) => r.id === r2.id)?.members.map((m) => m.botId)).toEqual(['B'])
 
     const r3 = addRoom('Three', ['A', 'B', 'C'], 'auto', 4)
     const allow = removeMember!(r3.id, 'C')
@@ -576,7 +575,7 @@ describe('Area 3: Group Creation, Conversation & Single-Bot Remove/Move', () => 
     expect(useRooms.getState().rooms.find((r) => r.id === r3.id)?.members).toHaveLength(2)
   })
 
-  it('E2E-T2-A3-04: moveMemberToRoom Guards (Same-Room, Source Min-2, Target Max-6, Duplicate Bot/Name)', async (ctx) => {
+  it('E2E-T2-A3-04: moveMemberToRoom Guards (Same-Room, Last Source Member, Target Max-6, Duplicate Bot/Name)', async (ctx) => {
     const storeMod = await import('@/rooms/roomStore')
     const moveMemberToRoom =
       ((storeMod as Record<string, unknown>).moveMemberToRoom as
@@ -598,9 +597,11 @@ describe('Area 3: Group Creation, Conversation & Single-Bot Remove/Move', () => 
     const rSix = addRoom('Dst6', ['B1', 'B2', 'B3', 'B4', 'B5', 'B6'], 'auto', 4)
 
     expect(moveMemberToRoom!(rThree.id, 'B7', rThree.id).ok).toBe(false) // same room
-    expect(moveMemberToRoom!(rTwo.id, 'B1', rThree.id).ok).toBe(false) // source min-2
     expect(moveMemberToRoom!(rThree.id, 'B7', rSix.id).ok).toBe(false) // target max-6
     expect(moveMemberToRoom!(rThree.id, 'B1', rTwo.id).ok).toBe(false) // duplicate bot in target
+    expect(moveMemberToRoom!(rTwo.id, 'B2', rThree.id).ok).toBe(true)
+    expect(moveMemberToRoom!(rTwo.id, 'B1', rThree.id).ok).toBe(false)
+    expect(useRooms.getState().rooms.find((r) => r.id === rTwo.id)?.members.map((m) => m.botId)).toEqual(['B1'])
   })
 
   it('E2E-T2-A3-05: Duplicate Bot Name Collision on addRoom', () => {

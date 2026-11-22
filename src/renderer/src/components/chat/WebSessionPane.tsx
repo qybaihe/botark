@@ -57,7 +57,7 @@ export function WebSessionPane({ bot, account }: WebSessionPaneProps) {
   }, [state.status, account.id, account.status, connectAccount])
 
   const reloadView = () => {
-    void getBridge()?.webViews?.navigate?.(viewId)
+    void getBridge()?.webViews?.navigate?.(viewId).then(() => connectAccount(account.id)).catch(() => undefined)
   }
 
   const openPopupWindow = () => {

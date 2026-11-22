@@ -64,7 +64,7 @@ export const PLATFORMS: readonly PlatformDescriptor[] = [
     description: 'Manus 个人智能体 · 多账号隔离、Agent 协同与云端沙盒',
     availability: 'available',
     monogram: 'Cu',
-    homeUrl: 'https://app.cue.im',
+    homeUrl: 'https://cue.im/',
     loginUrl: 'https://cue.im/login'
   }
 ]

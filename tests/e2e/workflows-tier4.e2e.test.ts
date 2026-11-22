@@ -239,8 +239,10 @@ describe('Tier 4: Real-World End-to-End Application Workflows', () => {
 
     expect(moveMemberToRoom!(backend.id, 'CueB', frontend.id).ok).toBe(true)
     expect(removeMember!(frontend.id, 'Hark').ok).toBe(true)
-    expect(removeMember!(frontend.id, 'Dot').ok).toBe(false)
-    expect(removeMember!(backend.id, 'Grok').ok).toBe(false)
+    expect(removeMember!(frontend.id, 'Dot').ok).toBe(true)
+    expect(removeMember!(frontend.id, 'CueB').ok).toBe(false)
+    expect(removeMember!(backend.id, 'Grok').ok).toBe(true)
+    expect(removeMember!(backend.id, 'CueA').ok).toBe(false)
 
     await submitBrief(backend.id, '@CueA finish backend')
     await submitBrief(frontend.id, '@CueB finish frontend')

@@ -1,6 +1,6 @@
 import { belongsToSelectedSession } from './sessionEvents'
 import { adapterRegistry } from "@adapters/registry"
-import type { AdapterEvent } from "@adapters/types"
+import type { AdapterEvent, PlatformId } from "@adapters/types"
 import { useBotStore } from "@/store/botStore"
 import { ReplyWatchdog } from "@/store/replyWatchdog"
 
@@ -50,9 +50,12 @@ function electronBridge(): Window["electron"] | undefined {
   return typeof window !== "undefined" ? window.electron : undefined
 }
 
-function handleEvent(event: AdapterEvent): void {
-    if (!belongsToSelectedSession(event, useBotStore.getState().bots)) return
+function handleEvent(platformId: PlatformId, event: AdapterEvent): void {
   const store = useBotStore.getState()
+  const accountId = event.type === "message" ? event.message.accountId : event.accountId
+  const account = store.accounts[accountId]
+  if (account && account.platformId !== platformId) return
+  if (!belongsToSelectedSession(event, store.bots)) return
   if (event.type === "message") watchdog.touch(botIdFor(event.message.conversationId))
   else if (event.type === "typing" || event.type === "message_delta") watchdog.touch(botIdFor(event.conversationId))
   else if (event.type === "activity") touchAccount(event.accountId)
@@ -114,7 +117,9 @@ function handleEvent(event: AdapterEvent): void {
  * Returns a cleanup function that unsubscribes all listeners.
  */
 export function startAdapterBridge(): () => void {
-  const unsubscribers = adapterRegistry.list().map((adapter) => adapter.subscribe(handleEvent))
+  const unsubscribers = adapterRegistry.list().map((adapter) =>
+    adapter.subscribe((event) => handleEvent(adapter.id, event))
+  )
 
   const bridge = electronBridge()
   if (bridge?.grok?.onEvent) {

@@ -92,6 +92,9 @@ function AddBotFlow({ open, onClose }: { open: boolean; onClose: () => void }) {
     } else if (initialPlatform === 'antigravity') {
       autoStartedRef.current = true
       login.start('antigravity')
+    } else if (initialPlatform === 'cue') {
+      autoStartedRef.current = true
+      login.start('cue')
     }
   }, [open, initialPlatform, liveGrokAccounts.length])
 
@@ -159,6 +162,9 @@ function AddBotFlow({ open, onClose }: { open: boolean; onClose: () => void }) {
         }
       ]
     })
+    if (platformId === 'cue') {
+      void useBotStore.getState().connectAccount(login.accountId)
+    }
   }
 
   const platform = phase.kind === 'idle' ? undefined : getPlatform(phase.platformId)
@@ -648,7 +654,7 @@ export function LoginWaiting({
     try {
       await openHttps(systemLoginUrl)
       setBrowserOpened(true)
-      if (platformId === 'hark' || platformId === 'dot') {
+      if (platformId === 'hark' || platformId === 'dot' || platformId === 'cue') {
         setShowRaw(true)
       }
     } catch (e) {
@@ -719,10 +725,31 @@ export function LoginWaiting({
     }
   }
 
+  const quickImportCueRaw = async () => {
+    if (!accountId || !rawInput.trim() || !window.electron?.cue?.importCredentials) return
+    setBusy(true)
+    setErr('')
+    try {
+      const st = await window.electron.cue.importCredentials({
+        accountId,
+        credential: rawInput.trim()
+      })
+      if (!st.signedIn) {
+        setErr('未检测到有效 Cue 会话，请检查 Cookie（cue_session_id）/ Bearer Token')
+        return
+      }
+      await window.electron.cue.cancelLogin?.(accountId).catch(() => undefined)
+    } catch (e) {
+      setErr(errorMessage(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const waitingHeadline = browserOpened
     ? platformId === 'grok'
       ? tr('已在默认浏览器打开授权页，点击确认后将自动同步…', 'Authorization opened in your browser. Confirm there to sync automatically…')
-      : platformId === 'hark' || platformId === 'dot'
+      : platformId === 'hark' || platformId === 'dot' || platformId === 'cue'
         ? tr(
             '已在系统浏览器打开登录页，完成后请复制 Cookie / Token 并粘贴至下方导入',
             'Opened in your system browser. After signing in, paste your Cookie / Token below'
@@ -774,7 +801,7 @@ export function LoginWaiting({
           </Button>
         )}
 
-        {(platformId === 'grok' || platformId === 'dot' || platformId === 'hark') && accountId && (
+        {(platformId === 'grok' || platformId === 'dot' || platformId === 'hark' || platformId === 'cue') && accountId && (
           <Button variant="ghost" disabled={busy} onClick={() => setShowRaw((v) => !v)}>
             粘贴凭据导入
           </Button>
@@ -850,6 +877,27 @@ export function LoginWaiting({
             variant="primary"
             disabled={busy || !rawInput.trim()}
             onClick={() => void quickImportHarkRaw()}
+          >
+            {busy ? '正在验证会话…' : '导入凭据并继续'}
+          </Button>
+        </div>
+      )}
+
+      {platformId === 'cue' && showRaw && (
+        <div className="flex w-full flex-col gap-1.5 text-left">
+          <textarea
+            value={rawInput}
+            onChange={(e) => setRawInput(e.target.value)}
+            placeholder="粘贴 Cue Cookie（含 cue_session_id=...）、Bearer Token (eyJ...) 或 JSON…"
+            rows={3}
+            spellCheck={false}
+            className="w-full rounded-lg border border-line bg-surface p-2 font-mono text-[11.5px] text-ink outline-none"
+          />
+          <Button
+            size="sm"
+            variant="primary"
+            disabled={busy || !rawInput.trim()}
+            onClick={() => void quickImportCueRaw()}
           >
             {busy ? '正在验证会话…' : '导入凭据并继续'}
           </Button>

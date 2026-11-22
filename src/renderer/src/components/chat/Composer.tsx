@@ -23,6 +23,7 @@ interface ComposerProps {
   onHarkLogin?: (accountId: string) => void
   onDotLogin?: (accountId: string) => void
   onAntigravityLogin?: (accountId: string) => void
+  onCueLogin?: (accountId: string) => void
   /** The empty conversation already shows its own sign-in action. */
   hideNotice?: boolean
 }
@@ -36,7 +37,8 @@ function ConnectionNotice({
   onGrokLogin,
   onHarkLogin,
   onDotLogin,
-  onAntigravityLogin
+  onAntigravityLogin,
+  onCueLogin
 }: {
   account: BotAccount
   onConnect: () => void
@@ -45,6 +47,7 @@ function ConnectionNotice({
   onHarkLogin?: () => void
   onDotLogin?: () => void
   onAntigravityLogin?: () => void
+  onCueLogin?: () => void
 }) {
   const isError = account.status === 'error'
   const isMuse = account.platformId === 'meta-muse'
@@ -53,6 +56,7 @@ function ConnectionNotice({
   const isDot = account.platformId === 'dot'
   const isHermes = account.platformId === 'hermes'
   const isAntigravity = account.platformId === 'antigravity'
+  const isCue = account.platformId === 'cue'
   return (
     <div
       className={cn(
@@ -61,7 +65,7 @@ function ConnectionNotice({
       )}
       role="status"
     >
-      {isMuse || isHark || isDot || isAntigravity ? (
+      {isMuse || isHark || isDot || isAntigravity || isCue ? (
         <LogIn className="size-4 shrink-0 text-accent-600" aria-hidden />
       ) : (
         <PlugZap className="size-4 shrink-0 text-ink-muted" aria-hidden />
@@ -81,7 +85,9 @@ function ConnectionNotice({
                     ? '连接 Hermes API Server（hermes gateway）后即可发消息'
                     : isAntigravity
                       ? '登录 Google Antigravity（antigravity.google.com）后即可发消息'
-                      : '账号未连接'}
+                      : isCue
+                        ? '登录 Cue（cue.im）后即可发消息'
+                        : '账号未连接'}
       </span>
       {isMuse && onMuseLogin && !isError ? (
         <>
@@ -97,7 +103,7 @@ function ConnectionNotice({
         <>
           <Button size="sm" variant="primary" onClick={onHarkLogin} disabled={account.pending}>
             {account.pending && <Loader2 className="animate-spin" aria-hidden />}
-            {account.pending ? '登录中…' : '使用 Hark 登录'}
+            {account.pending ? (account.statusDetail ?? '处理中…') : '使用 Hark 登录'}
           </Button>
           <Button size="sm" variant="ghost" onClick={onConnect} disabled={account.pending}>
             刷新会话
@@ -123,6 +129,16 @@ function ConnectionNotice({
             刷新会话
           </Button>
         </>
+      ) : isCue && onCueLogin && !isError ? (
+        <>
+          <Button size="sm" variant="primary" onClick={onCueLogin} disabled={account.pending}>
+            {account.pending && <Loader2 className="animate-spin" aria-hidden />}
+            {account.pending ? (account.statusDetail ?? '登录中…') : '使用 Cue 登录'}
+          </Button>
+          <Button size="sm" variant="ghost" onClick={onConnect} disabled={account.pending}>
+            刷新会话
+          </Button>
+        </>
       ) : isGrok && onGrokLogin ? (
         <>
           <Button size="sm" variant="primary" onClick={onGrokLogin} disabled={account.pending}>
@@ -143,7 +159,7 @@ function ConnectionNotice({
   )
 }
 
-export function Composer({ bot, account, typing = false, onSend, onCancel, onConnect, onMuseLogin, onGrokLogin, onHarkLogin, onDotLogin, onAntigravityLogin, hideNotice = false }: ComposerProps) {
+export function Composer({ bot, account, typing = false, onSend, onCancel, onConnect, onMuseLogin, onGrokLogin, onHarkLogin, onDotLogin, onAntigravityLogin, onCueLogin, hideNotice = false }: ComposerProps) {
   const [text, setText] = useState('')
   const [attachments, setAttachments] = useState<DraftAttachment[]>([])
   const [draft] = useState(() => createAttachmentDraft(setAttachments))
@@ -218,6 +234,7 @@ export function Composer({ bot, account, typing = false, onSend, onCancel, onCon
             onHarkLogin={onHarkLogin ? () => onHarkLogin(account.id) : undefined}
             onDotLogin={onDotLogin ? () => onDotLogin(account.id) : undefined}
             onAntigravityLogin={onAntigravityLogin ? () => onAntigravityLogin(account.id) : undefined}
+            onCueLogin={onCueLogin ? () => onCueLogin(account.id) : undefined}
           />
         )}
 

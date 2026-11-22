@@ -313,8 +313,8 @@ export function removeMember(roomId: string, botId: string): { ok: boolean; erro
   if (!room.members.some((m) => m.botId === botId)) {
     return { ok: false, error: '该成员不在当前群聊中' }
   }
-  if (room.members.length <= 2) {
-    return { ok: false, error: '协作群聊至少需要保留 2 位成员' }
+  if (room.members.length <= 1) {
+    return { ok: false, error: '群聊至少需要保留一位成员' }
   }
   if (runs.has(roomId) || useRooms.getState().speakers[roomId]) {
     stopRoom(roomId)
@@ -342,8 +342,8 @@ export function moveMemberToRoom(
   if (!target) return { ok: false, error: '未找到目标群聊' }
   const member = source.members.find((m) => m.botId === botId)
   if (!member) return { ok: false, error: '该成员不在当前群聊中' }
-  if (source.members.length <= 2) {
-    return { ok: false, error: '当前群聊至少需要保留 2 位成员，无法移出' }
+  if (source.members.length <= 1) {
+    return { ok: false, error: '当前群聊至少需要保留一位成员' }
   }
   if (target.members.length >= 6) {
     return { ok: false, error: '目标群聊成员已达上限（6 位）' }
@@ -517,9 +517,19 @@ export async function submitBrief(
   update(id, (r) => ({ ...r, brief: text, finalId: undefined, messages: [...r.messages, message] }))
   const queue = mentions(text, room.members)
   if (!queue.length && room.mode === 'auto') {
-    queue.push(room.members[0]!)
+    const { accounts } = useBotStore.getState()
+    const first = room.members.find((member) => {
+      const status = adapterRegistry.get(member.platform)?.getStatus(member.accountId)
+      return status === 'online' || status === 'attention'
+    }) ?? room.members.find((member) => isConnectedStatus(accounts[member.accountId]?.status))
+      ?? room.members[0]
+    if (first) queue.push(first)
   }
   try {
+    if (room.members.length === 0) {
+      setError(id, '群聊没有可对话的成员')
+      return
+    }
     if (!queue.length && room.mode === 'manual') {
       setError(
         id,

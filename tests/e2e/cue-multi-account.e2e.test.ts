@@ -453,4 +453,48 @@ describe('Area 2: Cue Multi-Account Management (grokbot Blueprint)', () => {
       )
     ).toBe(false)
   })
+
+  it('E2E-T1-A2-08: Cue Web Session Cookie Login & Direct RPC Without API Key', async (ctx) => {
+    const cue = await probeCueContracts(ctx)
+    const registerCueIpc = cue.ipcMod.registerCueIpc as () => void
+    registerCueIpc()
+    const CUE_CHANNELS = ((await import('@shared/ipc')) as Record<string, unknown>).CUE_CHANNELS as Record<
+      string,
+      string
+    >
+
+    const ses = electronHarness.getSession(partitionForAccount('acc_cue_web_1'))
+    await ses.cookies.set({
+      url: 'https://cue.im',
+      name: 'cue_session_id',
+      value: 'eyJhbGciOiJub25lIn0.eyJlbWFpbCI6IndlYnVzZXJAY3VlLmltIiwibmFtZSI6IldlYiBDdWUiLCJleHAiOjk5OTk5OTk5OTl9.sig',
+      domain: '.cue.im',
+      path: '/'
+    })
+
+    const st = (await electronHarness.invokeIpc(CUE_CHANNELS.authStatus, 'acc_cue_web_1')) as {
+      signedIn: boolean
+      handle?: string
+      displayName?: string
+      authKind?: string
+    }
+    expect(st.signedIn).toBe(true)
+    expect(st.handle).toBe('webuser@cue.im')
+    expect(st.displayName).toBe('Web Cue')
+    expect(st.authKind).toBe('session')
+
+    const health = (await electronHarness.invokeIpc(CUE_CHANNELS.rpc, {
+      accountId: 'acc_cue_web_1',
+      op: 'health'
+    })) as { ok: boolean }
+    expect(health.ok).toBe(true)
+
+    const agents = (await electronHarness.invokeIpc(CUE_CHANNELS.rpc, {
+      accountId: 'acc_cue_web_1',
+      op: 'listAgents'
+    })) as { ok: boolean; data: Array<{ id: string; name: string }> }
+    expect(agents.ok).toBe(true)
+    expect(Array.isArray(agents.data)).toBe(true)
+    expect(agents.data.length).toBeGreaterThanOrEqual(1)
+  })
 })

@@ -1686,7 +1686,7 @@ export const useBotStore = create<BotHubState>()(
       if (bot?.activeAccountId !== accountId || bot.activeSessionId !== sessionId) return s
       const hydrated = harkHistory({ messages }, botId, accountId)
       return {
-        accounts: hydrated.length > 0 ? applyAccountLive(s.accounts, accountId, 'online', ['offline', 'error']) : s.accounts,
+        accounts: applyAccountLive(s.accounts, accountId, 'online', ['offline', 'error']),
         messages: { ...s.messages, [botId]: mergeHydratedMessages(s.messages[botId] ?? [], hydrated) }
       }
     }),
@@ -2051,7 +2051,7 @@ export const useBotStore = create<BotHubState>()(
       const account = get().accounts[accountId]
       const adapter = account && adapterRegistry.get(account.platformId)
       if (!account || !adapter || account.pending) return
-      patchAccount(accountId, { pending: true })
+      patchAccount(accountId, { pending: true, statusDetail: account.platformId === 'hark' ? '正在验证 Hark 会话…' : account.statusDetail })
       try {
         const status = await adapter.connect(accountId)
         const isLive = status === 'online' || status === 'busy' || status === 'attention'
@@ -2073,7 +2073,7 @@ export const useBotStore = create<BotHubState>()(
             })
             .catch(() => undefined)
           const bot = get().bots.find((b) => b.activeAccountId === accountId)
-          if (bot) await loadHarkSession(bot, bot.activeSessionId, sessionSelections.get(bot.id))
+          if (bot) void loadHarkSession(bot, bot.activeSessionId, sessionSelections.get(bot.id))
             .catch((error) => patchAccount(accountId, { statusDetail: errorMessage(error) }))
         } else if (account.platformId === 'antigravity' && isLive) {
           const bridge = electronBridge()
@@ -2662,11 +2662,13 @@ export const useBotStore = create<BotHubState>()(
         accounts: {
           ...s.accounts,
           [accountId]: {
+            ...s.accounts[accountId],
             id: accountId,
             platformId: 'cue',
             displayName: s.accounts[accountId]?.label || st.displayName || handle || 'Cue',
             handle,
-            status: st.signedIn ? 'online' : 'offline'
+            status: st.signedIn ? 'online' : 'offline',
+            statusDetail: undefined
           }
         }
       }))
@@ -2942,10 +2944,13 @@ export const useBotStore = create<BotHubState>()(
     name: 'bothub-workspace-v1',
     storage: workspaceStorage,
     // Nothing is in flight after a restart; drop stale `sending`/`pending`.
-    merge: (persisted, current) => ({
-      ...current,
-      ...sanitizePersisted((persisted ?? {}) as Partial<BotHubState>)
-    }),
+    merge: (persisted, current) => {
+      const restored = { ...current, ...sanitizePersisted((persisted ?? {}) as Partial<BotHubState>) }
+      return {
+        ...restored,
+        webSessionOpen: restored.selectedBotId ? restored.webSessionByBot[restored.selectedBotId] === true : false
+      }
+    },
     partialize: (state) => ({
       groups: state.groups,
       bots: state.bots,

@@ -1424,6 +1424,7 @@ export interface CueOpenLoginRequest {
 
 export interface CueImportCredentialsRequest {
   accountId: string
+  verifyApiKey?: boolean
   credential?: string
   rawInput?: string
   accessToken?: string
@@ -1472,6 +1473,7 @@ export type CueRpcRequest =
       sessionId?: string
       conversationId?: string
       afterMessageId?: string
+      expectedUserText?: string
       baseUrl?: string
     }
   | {

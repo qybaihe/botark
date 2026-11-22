@@ -180,7 +180,7 @@ function useDocumentContent(target: NativeDocumentTarget | null) {
       }
 
       const muse = bridge?.muse
-      if (muse) {
+      if (muse && (!target.platformId || target.platformId === 'meta-muse' || isMuseUrl)) {
         const cleanPath = rawPath.replace(/^\/+/, '')
         if (muse.previewWorkspaceFile) {
           try {

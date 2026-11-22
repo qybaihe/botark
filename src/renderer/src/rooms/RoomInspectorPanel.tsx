@@ -190,7 +190,7 @@ export function RoomInspectorPanel({ room }: { room: CollabRoom }) {
                     const isSpeaking = speaker === m.name
                     const platform = getPlatform(m.platform)
                     const isMoving = movingBotId === m.botId
-                    const cannotRemove = room.members.length <= 2
+                    const cannotRemove = room.members.length <= 1
                     const eligibleTargets = otherRooms.filter(
                       (r) =>
                         r.members.length < 6 &&
@@ -244,10 +244,11 @@ export function RoomInspectorPanel({ room }: { room: CollabRoom }) {
                               type="button"
                               title={
                                 cannotRemove
-                                  ? '协作群聊至少保留 2 位成员'
+                                  ? '群聊至少保留一位成员'
                                   : `将 ${m.name} 移动到其他群组`
                               }
                               aria-label={`移动 ${m.name}`}
+                              disabled={cannotRemove}
                               onClick={() => {
                                 setMemberFeedback(null)
                                 if (isMoving) {
@@ -268,8 +269,9 @@ export function RoomInspectorPanel({ room }: { room: CollabRoom }) {
                             </button>
                             <button
                               type="button"
-                              title={cannotRemove ? '协作群聊至少保留 2 位成员' : `移出 ${m.name}`}
+                              title={cannotRemove ? '群聊至少保留一位成员' : `移出 ${m.name}`}
                               aria-label={`移出 ${m.name}`}
+                              disabled={cannotRemove}
                               onClick={() => {
                                 const res = removeMember(room.id, m.botId)
                                 if (!res.ok) {

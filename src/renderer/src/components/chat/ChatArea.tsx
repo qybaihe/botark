@@ -105,6 +105,7 @@ export function ChatArea() {
   const openHarkLogin = useBotStore((s) => s.openHarkLogin)
   const openDotLogin = useBotStore((s) => s.openDotLogin)
   const openAntigravityLogin = useBotStore((s) => s.openAntigravityLogin)
+  const openCueLogin = useBotStore((s) => s.openCueLogin)
   const webSessionOpen = useBotStore((s) => s.webSessionOpen)
   const hasBots = useBotStore((s) => s.bots.length > 0)
   const infoPanelOpen = useBotStore((s) => s.infoPanelOpen)
@@ -139,6 +140,10 @@ export function ChatArea() {
   const onAntigravityLogin = useCallback(
     (accountId: string) => void openAntigravityLogin(accountId),
     [openAntigravityLogin]
+  )
+  const onCueLogin = useCallback(
+    (accountId: string) => void openCueLogin(accountId, false),
+    [openCueLogin]
   )
 
   if (!bot) {
@@ -175,6 +180,8 @@ export function ChatArea() {
         return
       case 'antigravity':
         return onAntigravityLogin(activeAccount.id)
+      case 'cue':
+        return onCueLogin(activeAccount.id)
     }
   }
 
@@ -232,6 +239,7 @@ export function ChatArea() {
               onHarkLogin={onHarkLogin}
               onDotLogin={onDotLogin}
               onAntigravityLogin={onAntigravityLogin}
+              onCueLogin={onCueLogin}
               hideNotice={needsPlatformLogin && messages.length === 0 && !typing}
             />
           </>
