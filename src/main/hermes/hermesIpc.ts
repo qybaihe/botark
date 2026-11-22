@@ -158,6 +158,9 @@ async function runHermesRpc(req: HermesRpcRequest): Promise<HermesRpcResponse> {
           model: req.model,
           attachments: req.attachments,
           callbacks: {
+            onAccepted: () => {
+              if (req.requestId) broadcast({ type: 'accepted', accountId: req.accountId, requestId: req.requestId })
+            },
             onDelta: (payload) => {
               broadcast({
                 type: 'stream',

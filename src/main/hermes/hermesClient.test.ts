@@ -1,5 +1,5 @@
 import { createServer } from 'node:http'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   buildHermesUserContent,
   extractInlineDataUrlImages,
@@ -52,6 +52,28 @@ describe('hermesStore helpers', () => {
 })
 
 describe('hermesClient protocol helpers', () => {
+  it.each([streamNativeSessionTurn, streamOpenAICompatTurn])(
+    'reports an accepted turn only after a successful gateway response (%s)',
+    async (stream) => {
+      const onAccepted = vi.fn()
+      const args = {
+        accountId: 'fixture', baseUrl: 'http://127.0.0.1:8642', userContent: 'Hello',
+        sessionId: 'session', sessionKey: 'fixture', controller: new AbortController(),
+        callbacks: { onAccepted, onDelta: vi.fn() }
+      }
+      await expect(stream({ ...args, fetchImpl: async () => new Response('Rejected', { status: 401 }) }))
+        .rejects.toMatchObject({ status: 401 })
+      expect(onAccepted).not.toHaveBeenCalled()
+
+      await stream({
+        ...args,
+        fetchImpl: async () => new Response('data: [DONE]\n\n', { headers: { 'Content-Type': 'text/event-stream' } })
+      })
+      expect(onAccepted).toHaveBeenCalledTimes(1)
+      expect(onAccepted.mock.invocationCallOrder[0]).toBeLessThan(args.callbacks.onDelta.mock.invocationCallOrder[0]!)
+    }
+  )
+
   it('builds plain text or multimodal image_url arrays for Hermes', () => {
     expect(buildHermesUserContent('  hello  ')).toBe('hello')
     const multimodal = buildHermesUserContent('inspect this', [

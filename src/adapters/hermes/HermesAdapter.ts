@@ -46,6 +46,7 @@ export class HermesAdapter implements PlatformAdapter {
   private readonly accounts = new Map<string, PlatformAccount>()
   private readonly statuses = new Map<string, ConnectionStatus>()
   private readonly listeners = new Set<AdapterListener>()
+  private readonly pendingAcceptances = new Map<string, () => void>()
   private readonly activeSessionId = new Map<string, string>()
   private bridgeUnsub: Unsubscribe | null = null
 
@@ -60,6 +61,10 @@ export class HermesAdapter implements PlatformAdapter {
   }
 
   private handleMainEvent(event: HermesMainEvent): void {
+    if (event.type === 'accepted') {
+      this.pendingAcceptances.get(event.requestId)?.()
+      return
+    }
     if (event.type === 'activity') {
       this.emit({
         type: 'activity',
@@ -246,14 +251,19 @@ export class HermesAdapter implements PlatformAdapter {
 
     const sessionId = message.sessionId || this.activeSessionId.get(message.accountId)
     let accepted = false
-    try {
+    const requestId = createId('hermes_req')
+    const markAccepted = () => {
+      if (accepted) return
       accepted = true
       message.onAccepted?.()
-
+    }
+    this.pendingAcceptances.set(requestId, markAccepted)
+    try {
       const res = (await invokeHermesRpc({
         accountId: message.accountId,
         op: 'sendMessage',
         botId: message.conversationId,
+        requestId,
         sessionId,
         text: message.text,
         attachments: message.attachments
@@ -271,6 +281,7 @@ export class HermesAdapter implements PlatformAdapter {
         media?: MuseMediaPart[]
       }
 
+      markAccepted()
       if (res?.sessionId) {
         this.activeSessionId.set(message.accountId, res.sessionId)
       }
@@ -317,6 +328,8 @@ export class HermesAdapter implements PlatformAdapter {
       const next = statusAfterSendFailure(error)
       this.setStatus(message.accountId, next, next === 'error' ? detail : undefined)
       throw error instanceof AdapterError ? error : new AdapterError('network', detail)
+    } finally {
+      this.pendingAcceptances.delete(requestId)
     }
   }
 

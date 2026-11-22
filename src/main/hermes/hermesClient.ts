@@ -958,6 +958,7 @@ export function cancelAllHermesRuns(accountId: string): void {
 // ---------------- Streaming Chat (Native Session SSE + OpenAI Fallback) ----------------
 
 export interface HermesStreamCallbacks {
+  onAccepted?: () => void
   onDelta: (payload: {
     messageId: string
     sessionId?: string
@@ -1015,6 +1016,7 @@ export async function streamNativeSessionTurn(args: {
     throw new HermesApiError(err.message, res.status, err.code, err.body)
   }
 
+  args.callbacks.onAccepted?.()
   const reader = res.body?.getReader()
   if (!reader) {
     throw new HermesApiError('Hermes 流式响应体为空', 502)
@@ -1260,6 +1262,7 @@ export async function streamOpenAICompatTurn(args: {
     throw new HermesApiError(err.message, res.status, err.code, err.body)
   }
 
+  args.callbacks.onAccepted?.()
   const effectiveSessionId = res.headers.get('X-Hermes-Session-Id') || args.sessionId
   const contentType = res.headers.get('content-type') || ''
   let messageId = `hermes_${Date.now()}`

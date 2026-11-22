@@ -1241,6 +1241,7 @@ export interface HermesApprovalView {
 }
 
 export type HermesMainEvent =
+  | { type: 'accepted'; accountId: string; requestId: string }
   | {
       type: 'login'
       accountId: string
@@ -1305,6 +1306,7 @@ export type HermesRpcRequest =
       accountId: string
       op: 'sendMessage'
       botId?: string
+      requestId?: string
       sessionId?: string
       text: string
       model?: string
