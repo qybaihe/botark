@@ -108,7 +108,7 @@ function reconcileRoomMemberList(
       bot.activeAccountId ||
       (bot.accountIds?.includes(member.accountId) ? member.accountId : bot.accountIds?.[0]) ||
       member.accountId
-    const nextAgentId = bot.selectedAgentId ?? member.agentId
+    const nextAgentId = bot.selectedAgentId
     const rawName = bot.name?.trim()
     let nextName = member.name
     if (rawName) {
@@ -153,6 +153,7 @@ function reconcileRoomMemberList(
         accountId: nextAccountId,
         agentId: nextAgentId,
         name: nextName,
+        cursor: resetSession ? 0 : member.cursor,
         sessionId: nextSessionId
       }
     }
@@ -170,6 +171,9 @@ function reconcileRooms(targetRoomId?: string) {
     const res = reconcileRoomMemberList(room.members, bots, accounts)
     if (!res.changed) return room
     anyChanged = true
+    if (res.members.some((m, i) => m.accountId !== room.members[i]!.accountId || m.agentId !== room.members[i]!.agentId)) {
+      stopRoom(room.id)
+    }
     return { ...room, members: res.members }
   })
   if (anyChanged) {
@@ -259,7 +263,7 @@ export function deleteRoom(id: string) {
 export function addRoom(title: string, ids: string[], mode: CollabRoom['mode'], limit: number) {
   const { bots, accounts } = useBotStore.getState()
   const usedNames = new Set<string>()
-  const members: RoomMember[] = ids.map((id) => {
+  const members: RoomMember[] = [...new Set(ids)].map((id) => {
     const bot = bots.find((b) => b.id === id)
     const storeStatus = bot ? accounts[bot.activeAccountId]?.status : undefined
     const adapterStatus = bot
@@ -501,6 +505,7 @@ async function memberReply(room: CollabRoom, member: RoomMember, signal: AbortSi
         sessionId = undefined
       }
     }
+    signal.throwIfAborted()
     if (sessionId && sessionId !== member.sessionId)
       update(room.id, (r) => ({
         ...r,
@@ -598,11 +603,12 @@ export async function submitBrief(
     const previous = pendingTurns.get(id)
     if (previous) await previous.catch(() => {})
     controller.signal.throwIfAborted()
-    for (let turn = 0; turn < room.limit && queue.length; turn++) {
+    for (let turn = 0; queue.length; turn++) {
       const next = queue.shift()!
       const current = roomById(id)
-      const member = current?.members.find((m) => m.botId === next.botId)
-      if (!current || !member) continue
+      if (!current || turn >= current.limit) break
+      const member = current.members.find((m) => m.botId === next.botId)
+      if (!member) continue
       useRooms.setState((s) => ({
         speakers: { ...s.speakers, [id]: member.name },
         turnProgress: { ...s.turnProgress, [id]: { turn: turn + 1, limit: current.limit } }
@@ -632,7 +638,8 @@ export async function submitBrief(
       }))
       if (done) break
       const tool = requestedTool(post.text)
-      if (tool && turn + 1 < room.limit) {
+      const latest = roomById(id)!
+      if (tool && turn + 1 < latest.limit) {
         const bridge = getBridge()?.workspace
         if (!bridge) throw new Error('工作区不可用')
         const recipient = [
@@ -654,8 +661,8 @@ export async function submitBrief(
         queue.unshift(member)
         continue
       }
-      if (room.mode === 'auto') {
-        for (const target of mentions(post.text, room.members)) {
+      if (latest.mode === 'auto') {
+        for (const target of mentions(post.text, latest.members)) {
           if (target.botId !== member.botId && !queue.some((m) => m.botId === target.botId)) {
             queue.push(target)
           }

@@ -120,3 +120,48 @@ it('renames, updates config, clears transcripts, and removes forked Slack thread
   expect(useRooms.getState().rooms).toEqual([])
   expect(useBotStore.getState().selectedBotId).toBe('fallback-bot')
 })
+
+it('stops the old identity before accepting its late reply and resets the new session context', async () => {
+  let finish!: (text: string) => void
+  fixture('auto', () => new Promise((resolve) => { finish = resolve }))
+  const original = useRooms.getState().rooms[0]!
+  useRooms.setState({ rooms: [{ ...original, members: original.members.map((m) => ({
+    ...m, cursor: 2, sessionId: 'previous-session'
+  })) }] })
+  const run = submitBrief('room', '@Muse review')
+  useBotStore.setState(({ bots }) => ({ bots: bots.map((b) => b.id === 'Muse'
+    ? { ...b, accountIds: ['Muse', 'other'], activeAccountId: 'other' } : b) }))
+  finish('@Dot old reply')
+  await run
+  const room = useRooms.getState().rooms[0]!
+  expect(room.members[0]).toMatchObject({ accountId: 'other', cursor: 0, sessionId: undefined })
+  expect(room.messages.map((m) => m.author)).toEqual(['User'])
+})
+
+it('honors a lowered turn cap before routing another reply', async () => {
+  fixture('auto', async () => {
+    updateRoomConfig('room', { limit: 1 })
+    return '@Dot check this'
+  })
+  await submitBrief('room', '@Muse start')
+  expect(useRooms.getState().rooms[0]!.messages.map((m) => m.author)).toEqual(['User', 'Muse'])
+})
+
+it('does not restore a session allocated after the user cleared the room', async () => {
+  let finish!: (response: { sessionId: string }) => void
+  const startSession = vi.fn(() => new Promise((resolve) => { finish = resolve }))
+  vi.stubGlobal('window', { electron: { muse: { startSession } } })
+  const respond = vi.fn(async () => 'reply')
+  fixture('auto', respond)
+  const original = useRooms.getState().rooms[0]!
+  useRooms.setState({ rooms: [{ ...original, members: original.members.map((m) => ({
+    ...m, platform: 'meta-muse'
+  })) }] })
+  const run = submitBrief('room', '@Muse start')
+  expect(startSession).toHaveBeenCalledOnce()
+  clearRoomTranscript('room')
+  finish({ sessionId: 'cleared-session' })
+  await run
+  expect(useRooms.getState().rooms[0]!.members[0]!.sessionId).toBeUndefined()
+  expect(respond).not.toHaveBeenCalled()
+})
