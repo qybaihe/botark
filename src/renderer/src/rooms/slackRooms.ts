@@ -6,7 +6,7 @@ import type { CollabRoom } from './model'
 export function receiveSlackMessage(event: SlackInbound): boolean {
   const rooms = useRooms.getState().rooms
   const parent = rooms.find((r) => r.id === event.roomId)
-  if (!parent) return false
+  if (!parent || parent.coordinatorId) return false
   const id = event.fork ? event.roomId + '/slack/' + event.channel + '/' + event.thread : parent.id
   let room = rooms.find((r) => r.id === id)
   if (!room) {
@@ -49,7 +49,7 @@ export function applySlackConnection(bridge: SlackBridge, connection: SlackState
   const stop = useRooms.subscribe((state, before) => {
     if (state.rooms === before.rooms) return
     for (const room of state.rooms) {
-      if (!bound.has(room.slackParent ?? room.id)) continue
+      if (room.coordinatorId || !bound.has(room.slackParent ?? room.id)) continue
       const old = before.rooms.find((r) => r.id === room.id)
       if (old && room.messages.length > old.messages.length) publishNew(bridge, room, old.messages.length)
     }

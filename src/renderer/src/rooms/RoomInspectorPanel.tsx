@@ -71,7 +71,7 @@ export function RoomInspectorPanel({ room }: { room: CollabRoom }) {
     setMemberFeedback(null)
   }, [room.id])
 
-  const otherRooms = allRooms.filter((r) => r.id !== room.id)
+  const otherRooms = allRooms.filter((r) => r.id !== room.id && !r.coordinatorId)
   const hermesAccount = room.members.find((m) => m.platform === 'hermes')?.accountId
 
   return (
@@ -128,7 +128,7 @@ export function RoomInspectorPanel({ room }: { room: CollabRoom }) {
             options={[
               { value: 'overview', label: '编排', icon: <ArkRelayOrbSvg /> },
               { value: 'workspace', label: '工作区', icon: <ArkWorkspaceVaultSvg /> },
-              { value: 'slack', label: 'Slack', icon: <ArkSlackWeaveSvg /> }
+              ...(room.coordinatorId ? [] : [{ value: 'slack' as const, label: 'Slack', icon: <ArkSlackWeaveSvg /> }])
             ]}
           />
         </div>
@@ -138,7 +138,7 @@ export function RoomInspectorPanel({ room }: { room: CollabRoom }) {
             <>
               <Section title="调度">
                 <div className="flex flex-col gap-2.5 text-[12px]">
-                  <SegmentedControl<CollabRoom['mode']>
+                  {room.coordinatorId ? <p>管理员可向已添加的 Bot 分派任务，回复在此汇总。</p> : <SegmentedControl<CollabRoom['mode']>
                     value={room.mode}
                     onValueChange={(mode) => updateRoomConfig(room.id, { mode })}
                     fullWidth
@@ -147,7 +147,7 @@ export function RoomInspectorPanel({ room }: { room: CollabRoom }) {
                       { value: 'auto', label: '自主接力', icon: <ArkPromptSparkSvg /> },
                       { value: 'manual', label: '手动 @' }
                     ]}
-                  />
+                  />}
 
                   <div className="flex items-center justify-between">
                     <span className="text-[12px] text-ink-secondary">单轮上限</span>
@@ -191,7 +191,7 @@ export function RoomInspectorPanel({ room }: { room: CollabRoom }) {
                     const isSpeaking = speaker === m.name
                     const platform = getPlatform(m.platform)
                     const isMoving = movingBotId === m.botId
-                    const cannotRemove = room.members.length <= 1
+                    const cannotRemove = Boolean(room.coordinatorId) || room.members.length <= 1
                     const eligibleTargets = otherRooms.filter(
                       (r) =>
                         r.members.length < 6 &&
@@ -204,7 +204,7 @@ export function RoomInspectorPanel({ room }: { room: CollabRoom }) {
                     return (
                       <li
                         key={m.botId}
-                        draggable={!isMoving}
+                        draggable={!cannotRemove && !isMoving}
                         title={cannotRemove ? undefined : `拖到 Bot 列表可移出，拖到其他群聊可转移`}
                         onDragStart={(e) => {
                           e.dataTransfer.effectAllowed = 'move'
@@ -277,7 +277,7 @@ export function RoomInspectorPanel({ room }: { room: CollabRoom }) {
                             </button>
                             <button
                               type="button"
-                              title={cannotRemove ? '群聊至少保留一位成员' : `移出 ${m.name}`}
+                              title={room.coordinatorId ? '管理员调度自动同步 Bot 列表' : cannotRemove ? '群聊至少保留一位成员' : `移出 ${m.name}`}
                               aria-label={`移出 ${m.name}`}
                               disabled={cannotRemove}
                               onClick={() => {
@@ -442,7 +442,7 @@ export function RoomInspectorPanel({ room }: { room: CollabRoom }) {
             />
           )}
 
-          {tab === 'slack' &&
+          {tab === 'slack' && !room.coordinatorId &&
             (room.slackParent ? (
               <Section title="Slack 线程">
                 <p className="font-mono text-[11.5px] text-ink-secondary">

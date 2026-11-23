@@ -25,6 +25,8 @@ export interface CollabRoom {
   mode: 'manual' | 'auto'
   limit: number
   brief: string
+  /** Present on a native coordination room owned by this administrator. */
+  coordinatorId?: string
   slackParent?: string
   slackChannel?: string
   slackThread?: string
@@ -103,7 +105,11 @@ export function turnPrompt(room: CollabRoom, member: RoomMember): string {
   return [
     `Collaboration room: ${room.title}. You are @${member.name}.`,
     `Members: ${room.members.map((m) => '@' + m.name).join(', ')}.`,
-    'Review, revise and choose a writer as needed. Mention a peer only to request their next turn. Start the final deliverable with [FINAL] on its own line.',
+    room.coordinatorId
+      ? member.botId === room.coordinatorId
+        ? 'Coordinate the human brief. Mention a teammate to assign work or ask for progress. Their reply comes back to you. Use [FINAL] when ready.'
+        : 'Answer the administrator’s request. Your reply returns to the administrator for review.'
+      : 'Review, revise and choose a writer as needed. Mention a peer only to request their next turn. Start the final deliverable with [FINAL] on its own line.',
     `Human brief: ${room.brief}`,
     context
   ].join('\n\n')

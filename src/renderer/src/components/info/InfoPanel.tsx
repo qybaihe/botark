@@ -1,3 +1,4 @@
+import { setRoomAdministrator, useRooms } from '@/rooms/roomStore'
 import { useMemo, useState } from 'react'
 import { Pencil, X } from 'lucide-react'
 import { PaneHeader } from '@/components/layout/PaneHeader'
@@ -279,6 +280,8 @@ export function InfoPanel() {
   const updateNotes = useBotStore((s) => s.updateNotes)
   const [requestedTab, setTab] = useState<InspectorTabId>('overview')
 
+  const coordinationRoom = useRooms((s) => s.rooms.find((r) => r.coordinatorId === bot?.id && r.coordinatorId))
+
   const accounts = useMemo(() => (bot ? getBotAccounts(bot, accountMap) : []), [bot, accountMap])
   const inspector = bot ? getPlatformInspector(bot.platformId) : null
   const activeTab = bot ? resolveInspectorTab(bot.platformId, requestedTab) : 'overview'
@@ -311,6 +314,19 @@ export function InfoPanel() {
           <div key={`${bot.id}:${activeTab}`} className="animate-veil-in">
             {activeTab === 'overview' ? (
               <>
+                <Section title="协作调度">
+                  <label className="flex items-center gap-2 text-[13px]">
+                    <input type="checkbox" checked={Boolean(coordinationRoom)}
+                      onChange={(e) => setRoomAdministrator(bot.id, e.target.checked)} />
+                    设为管理员
+                  </label>
+                  {coordinationRoom && (
+                    <button type="button" className="mt-2 text-[12px] text-accent-600"
+                      onClick={() => useBotStore.getState().selectBot(coordinationRoom.id)}>
+                      打开调度对话
+                    </button>
+                  )}
+                </Section>
                 {bot.platformId === 'meta-muse' && bot.activeAccountId && (
                   <>
                     <QuotaSection accountId={bot.activeAccountId} />
