@@ -55,7 +55,7 @@ import {
   type MuseSchedule as NativeSchedule,
   type MuseTaskRun as NativeRun
 } from '../muse-native/schedules'
-import { sessionsFromListResult, sessionIdParams } from '../muse-native/sessions'
+import { extractStartedSessionId, sessionsFromListResult, sessionIdParams } from '../muse-native/sessions'
 import { artifactsFromListResult, libraryFromResult } from '../muse-native/files'
 import { fetchMuseIdentitySnapshot } from '../muse-native/identity'
 import type {
@@ -785,7 +785,8 @@ export class MuseSessionManager {
     const p = params && typeof params === 'object' ? (params as Record<string, unknown>) : {}
     const sessionId = typeof p['session_id'] === 'string' ? (p['session_id'] as string) : undefined
     const accountSession = this.sessions.get(accountId)
-    if (accountSession && sessionId) accountSession.activeSessionId = sessionId
+    const isRoomTurn = Boolean(conversationId?.startsWith('room-turn-'))
+    if (accountSession && sessionId && !isRoomTurn) accountSession.activeSessionId = sessionId
     const messageOrigin =
       p['message_origin'] && typeof p['message_origin'] === 'object'
         ? (p['message_origin'] as Record<string, unknown>)
@@ -840,7 +841,7 @@ export class MuseSessionManager {
       )
       const resolvedSessionId =
         result.sessionId ?? (typeof result.ack['session_id'] === 'string' ? (result.ack['session_id'] as string) : undefined)
-      if (accountSession && resolvedSessionId) accountSession.activeSessionId = resolvedSessionId
+      if (accountSession && resolvedSessionId && !isRoomTurn) accountSession.activeSessionId = resolvedSessionId
       const reply = result.text || last
       return {
         ...result.ack,
@@ -1484,15 +1485,8 @@ export class MuseSessionManager {
   }
 
   async startSession(accountId: string): Promise<{ sessionId: string | null }> {
-    const raw = await this.rpc(accountId, 'session.start', {})
-    const o = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
-    const nested = o['session'] && typeof o['session'] === 'object' ? (o['session'] as Record<string, unknown>) : o
-    const sessionId =
-      typeof nested['session_id'] === 'string'
-        ? (nested['session_id'] as string)
-        : typeof nested['id'] === 'string'
-          ? (nested['id'] as string)
-          : null
+    const raw = await this.rpc(accountId, 'session.start', { method: '/api/session/start' })
+    const sessionId = extractStartedSessionId(raw)
     const session = this.sessions.get(accountId)
     if (session && sessionId) session.activeSessionId = sessionId
     void this.listSessions(accountId)

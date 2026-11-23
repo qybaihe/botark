@@ -492,8 +492,14 @@ async function memberReply(room: CollabRoom, member: RoomMember, signal: AbortSi
       if (!res?.ok) throw new Error(res?.message ?? 'Hark unavailable')
       sessionId = (res.data as { conversationId: string }).conversationId
     } else if (!sessionId && member.platform === 'meta-muse') {
-      sessionId = (await getBridge()?.muse.startSession(member.accountId))?.sessionId ?? undefined
-      if (!sessionId) throw new Error('Muse 未返回协作会话')
+      try {
+        sessionId = (await getBridge()?.muse.startSession(member.accountId))?.sessionId ?? undefined
+      } catch (err) {
+        // Never brick the entire collaboration room if `session.start` fails or is unsupported
+        // on a specific Muse VM: fall back to `chat.stream` allocating/returning `receipt.sessionId`.
+        console.warn('[room] muse.startSession failed; falling back to chat.stream session allocation', err)
+        sessionId = undefined
+      }
     }
     if (sessionId && sessionId !== member.sessionId)
       update(room.id, (r) => ({

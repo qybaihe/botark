@@ -90,6 +90,30 @@ export function sessionIdParams(sessionId: string): Record<string, unknown> {
   return { session_id: sessionId, id: sessionId }
 }
 
+/** Extract newly created session id from `session.start` responses (flat or wrapped). */
+export function extractStartedSessionId(raw: unknown): string | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const root = raw as Record<string, unknown>
+  const candidates: Record<string, unknown>[] = [root]
+  for (const key of ['result', 'data', 'session', 'thread']) {
+    const inner = obj(root[key])
+    if (Object.keys(inner).length) {
+      candidates.push(inner)
+      for (const nestedKey of ['session', 'thread']) {
+        const deeper = obj(inner[nestedKey])
+        if (Object.keys(deeper).length) candidates.push(deeper)
+      }
+    }
+  }
+  for (const c of candidates) {
+    for (const field of ['session_id', 'sessionId', 'id', 'thread_id', 'threadId']) {
+      const val = c[field]
+      if (typeof val === 'string' && val.trim()) return val.trim()
+    }
+  }
+  return null
+}
+
 export function formatSessionTime(msValue: number | null): string {
   if (msValue == null || msValue <= 0) return "—"
   try {

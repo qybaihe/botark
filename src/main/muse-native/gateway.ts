@@ -151,7 +151,7 @@ function toQuery(params: Record<string, unknown>, existingPath = ''): string {
 }
 
 /**
- * Extract canonical daemon path from Muse 400 validation errors such as:
+ * Extract canonical daemon method/path from Muse 400 validation errors such as:
  * `{"ok":false,"error":{"code":"invalid_params","message":"\`method\` must be \`/api/session/start\`"}}`
  */
 export function extractRequiredMethodPath(errText: string): string | null {
@@ -160,6 +160,13 @@ export function extractRequiredMethodPath(errText: string): string | null {
   const candidate = m?.[1]?.trim()
   if (!candidate || candidate.includes('..') || candidate.startsWith('//')) return null
   return candidate
+}
+
+/** Toggle `/api/session/*` <-> `/session/*` when a daemon returns 404 on one prefix. */
+export function computeSessionPathFallback(currentBase: string): string | null {
+  if (currentBase.startsWith('/api/session/')) return currentBase.slice('/api'.length)
+  if (currentBase.startsWith('/session/')) return `/api${currentBase}`
+  return null
 }
 
 /** Noise handshake class. Personal VM = hatch_vm; Shared Agent remote = shared_agent. */
@@ -191,6 +198,7 @@ export class MuseNativeGateway extends EventEmitter {
   private connecting: Promise<void> | null = null
   private streams = new Map<bigint, PendingStream>()
   private pathOverrides = new Map<string, string>()
+  private bodyMethodOverrides = new Map<string, string>()
   private heartbeat: ReturnType<typeof setInterval> | null = null
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private attempt = 0
@@ -495,7 +503,12 @@ export class MuseNativeGateway extends EventEmitter {
     const spec = MUSE_METHODS[method]
     if (!spec) throw new MuseGatewayError(`unknown muse method ${method}`, 'unknown_method')
     const template = this.pathOverrides.get(method) ?? spec.path
-    const { path, rest } = substitutePath(template, params)
+    const learnedBodyMethod = this.bodyMethodOverrides.get(method)
+    const effectiveParams =
+      learnedBodyMethod && params['method'] === undefined
+        ? { ...params, method: learnedBodyMethod }
+        : params
+    const { path, rest } = substitutePath(template, effectiveParams)
     const isGet = spec.httpMethod === 'GET'
     const isEmptyBody = isGet || spec.requestBody === 'empty'
     return {
@@ -535,14 +548,14 @@ export class MuseNativeGateway extends EventEmitter {
 
   /** Unary RPC. Returns parsed JSON (or text/records/binary) body; throws on HTTP ≥ 400. */
   async request(method: string, params: Record<string, unknown> = {}, timeoutMs?: number): Promise<unknown> {
-    return this.requestInternal(method, params, timeoutMs, true)
+    return this.requestInternal(method, params, timeoutMs, { triedPath: false, triedBodyMethod: false })
   }
 
   private async requestInternal(
     method: string,
     params: Record<string, unknown>,
     timeoutMs: number | undefined,
-    allowPathRedirect: boolean
+    retry: { triedPath: boolean; triedBodyMethod: boolean }
   ): Promise<unknown> {
     await this.connect()
     const req = this.buildRequest(method, params)
@@ -559,17 +572,40 @@ export class MuseNativeGateway extends EventEmitter {
     })
     if (res.status >= 400) {
       const errText = new TextDecoder().decode(res.body)
-      if (allowPathRedirect && (res.status === 400 || res.status === 404)) {
-        const spec = MUSE_METHODS[method]
-        const currentBase = req.path.split('?')[0] ?? req.path
-        let redirected = extractRequiredMethodPath(errText)
-        if (!redirected && res.status === 404 && spec && !spec.path.includes('{') && currentBase.startsWith('/api/session/')) {
-          redirected = currentBase.slice('/api'.length)
+      const spec = MUSE_METHODS[method]
+      const currentBase = req.path.split('?')[0] ?? req.path
+      const canSendJsonBody = Boolean(spec && spec.httpMethod !== 'GET' && spec.requestBody !== 'empty')
+
+      if (res.status === 400 || res.status === 404) {
+        const required = extractRequiredMethodPath(errText)
+        // 1. Daemon `invalid_params` errors such as "`method` must be `/api/session/start`"
+        // validate `params.method` inside the JSON body (even when HTTP path is already
+        // `/api/session/start`). Inject & cache `params.method` first.
+        if (required && canSendJsonBody && !retry.triedBodyMethod && params['method'] !== required) {
+          this.bodyMethodOverrides.set(method, required)
+          this.log('muse-native: learned required body method', { method, bodyMethod: required })
+          return this.requestInternal(
+            method,
+            { ...params, method: required },
+            timeoutMs,
+            { ...retry, triedBodyMethod: true }
+          )
         }
-        if (redirected && redirected !== currentBase && spec && !spec.path.includes('{')) {
-          this.pathOverrides.set(method, redirected)
-          this.log('muse-native: learned method path override', { method, path: redirected })
-          return this.requestInternal(method, params, timeoutMs, false)
+        // 2. If body already carried `method` (or GET/empty body), try redirecting HTTP path.
+        if (required && required !== currentBase && !retry.triedPath && spec && !spec.path.includes('{')) {
+          this.pathOverrides.set(method, required)
+          this.log('muse-native: learned method path override', { method, path: required })
+          return this.requestInternal(method, params, timeoutMs, { ...retry, triedPath: true })
+        }
+        // 3. On 404 for `/api/session/*` <-> `/session/*`, toggle prefix while preserving
+        // `triedBodyMethod` so a subsequent 400 body-method check can still self-heal.
+        if (res.status === 404 && !retry.triedPath && spec && !spec.path.includes('{')) {
+          const altPath = computeSessionPathFallback(currentBase)
+          if (altPath && altPath !== currentBase) {
+            this.pathOverrides.set(method, altPath)
+            this.log('muse-native: learned session path fallback', { method, path: altPath })
+            return this.requestInternal(method, params, timeoutMs, { ...retry, triedPath: true })
+          }
         }
       }
       let errJson: unknown = errText
