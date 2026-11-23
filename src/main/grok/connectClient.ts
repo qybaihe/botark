@@ -297,7 +297,7 @@ export class GrokConnectClient {
    * - `source`: 1 (`GROK_BOT_MESSAGE_SOURCE_DESKTOP`)
    * - `send_source`: 1 (`GROK_BOT_SEND_SOURCE_CHAT`)
    * - `renders_mcp_elicitation_forms`: true
-   * - `rendered_card_kinds`: [1, 2, 3, 4, 5] (APPROVAL, CHOICE, FORM, PAGE, PAYMENT)
+   * BotArk does not render the shopping/travel cards advertised by Sand.
    */
   sendUserMessage(req: {
     agentId: string
@@ -326,8 +326,7 @@ export class GrokConnectClient {
       initiator: GROK_USER_MESSAGE_INITIATOR.USER,
       source: GROK_MESSAGE_SOURCE.DESKTOP,
       send_source: GROK_SEND_SOURCE.CHAT,
-      renders_mcp_elicitation_forms: true,
-      rendered_card_kinds: [1, 2, 3, 4, 5]
+      renders_mcp_elicitation_forms: true
     })
   }
 
