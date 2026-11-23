@@ -10,7 +10,8 @@ import {
   Pencil,
   Plus,
   Square,
-  Trash2
+  Trash2,
+  X
 } from 'lucide-react'
 import { MarkdownText } from '@/components/chat/MarkdownText'
 import { PaneHeader } from '@/components/layout/PaneHeader'
@@ -47,13 +48,15 @@ import { cn } from '@/lib/cn'
 import { shortcutLabel } from '@/lib/shortcuts'
 import { useBotStore } from '@/store/botStore'
 import {
-  isFinal,
+  isHumanRoomMessage,
   mentions,
+  roomRecipient,
   splitMentionSegments,
   stripFinalPrefix,
   type CollabRoom,
   type RoomMember,
-  type RoomMessage
+  type RoomMessage,
+  type RoomReference
 } from './model'
 import { RoomAvatarCluster } from './RoomAvatarCluster'
 import { exportRoomMarkdownFile } from './RoomInspectorPanel'
@@ -749,6 +752,29 @@ function ToolExecutionCard({ message }: { message: RoomMessage }) {
   )
 }
 
+function ReferenceList({ references, onRemove }: {
+  references: RoomReference[]
+  onRemove?: (index: number) => void
+}) {
+  return (
+    <ul aria-label="随附资料" className="grid gap-1">
+      {references.map((ref, index) => (
+        <li key={index} className="flex items-start gap-2 rounded-md bg-sunken px-2 py-1 text-xs text-ink-secondary">
+          <details className="min-w-0 flex-1">
+            <summary className="cursor-pointer break-words">{ref.label}</summary>
+            <pre className="my-1 max-h-48 overflow-auto whitespace-pre-wrap break-words">{ref.text}</pre>
+          </details>
+          {onRemove && (
+            <button type="button" aria-label={`移除 ${ref.label}`} onClick={() => onRemove(index)}>
+              <X className="size-4" />
+            </button>
+          )}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
 function RoomMessageRow({
   room,
   message,
@@ -761,12 +787,14 @@ function RoomMessageRow({
   const bots = useBotStore((s) => s.bots)
   const [copied, setCopied] = useState(false)
 
-  if (message.author === 'Tool') {
+  if (message.notice) {
+    return <p className="mx-auto text-xs text-ink-muted">{message.text}</p>
+  }
+  if (!message.authorBotId && message.author === 'Tool') {
     return <ToolExecutionCard message={message} />
   }
 
-  const isUser = message.author === 'User' || message.author.startsWith('Slack ')
-  if (isUser) {
+  if (isHumanRoomMessage(message)) {
     const fromSlack = message.author.startsWith('Slack ')
     return (
       <div className="mx-auto flex w-full max-w-[780px] flex-col items-end gap-1 animate-veil-in">
@@ -778,13 +806,18 @@ function RoomMessageRow({
         <div className="max-w-[76%] rounded-[20px] bg-bubble-user px-4 py-2.5 text-[14px] leading-[22px] whitespace-pre-wrap break-words text-main">
           <HighlightMentions text={message.text} members={room.members} invert />
         </div>
+        {message.references && message.references.length > 0 && (
+          <div className="max-w-[76%]">
+            <ReferenceList references={message.references} />
+          </div>
+        )}
       </div>
     )
   }
 
-  const member = room.members.find((m) => m.name === message.author)
+  const member = room.members.find((m) => message.authorBotId ? m.botId === message.authorBotId : m.name === message.author)
   const bot = member ? bots.find((b) => b.id === member.botId) : undefined
-  const finalDeliverable = message.id === room.finalId || isFinal(message.text)
+  const finalDeliverable = message.id === room.finalId || message.final === true
   const cleanText = finalDeliverable ? stripFinalPrefix(message.text) : message.text
   const handoffs = mentions(cleanText, room.members).filter((t) => t.name !== message.author)
 
@@ -819,7 +852,7 @@ function RoomMessageRow({
               </button>
               <button
                 type="button"
-                onClick={() => exportRoomMarkdownFile(room)}
+                onClick={() => exportRoomMarkdownFile(room, message.id)}
                 title="导出 Markdown"
                 className="press-icon grid size-7 place-items-center rounded-full text-ink-secondary hover:bg-hover hover:text-ink"
               >
@@ -874,7 +907,7 @@ function RoomMessageRow({
           </button>
           <button
             type="button"
-            onClick={() => onMentionReply(message.author)}
+            onClick={() => onMentionReply(member?.name ?? message.author)}
             className="press inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11.5px] text-ink-muted hover:bg-hover hover:text-ink"
           >
             <ArkMentionLoopSvg className="size-3" />
@@ -905,6 +938,7 @@ export function RoomView({ id }: { id: string }) {
   const selectBot = useBotStore((s) => s.selectBot)
 
   const [text, setText] = useState('')
+  const [references, setReferences] = useState<RoomReference[]>([])
   const [multiline, setMultiline] = useState(false)
   const [mentionCursor, setMentionCursor] = useState(0)
   const transcriptRef = useRef<HTMLDivElement>(null)
@@ -927,9 +961,9 @@ export function RoomView({ id }: { id: string }) {
 
   useEffect(() => {
     const onAppend = (event: Event) => {
-      const detail = (event as CustomEvent<{ roomId: string; text: string }>).detail
+      const detail = (event as CustomEvent<{ roomId: string; reference: RoomReference }>).detail
       if (!detail || detail.roomId !== id) return
-      setText((prev) => [prev, detail.text].filter(Boolean).join('\n\n'))
+      setReferences((prev) => [...prev, detail.reference])
       requestAnimationFrame(() => {
         resize()
         textareaRef.current?.focus()
@@ -971,11 +1005,12 @@ export function RoomView({ id }: { id: string }) {
     })
   }
 
+  const canSend = Boolean(text.trim() || references.length)
   const submit = () => {
-    const trimmed = text.trim()
-    if (!trimmed) return
-    void submitBrief(id, trimmed)
+    if (!canSend) return
+    void submitBrief(id, text, { references })
     setText('')
+    setReferences([])
     setMentionCursor(0)
     requestAnimationFrame(resize)
   }
@@ -1234,6 +1269,11 @@ export function RoomView({ id }: { id: string }) {
               'focus-within:border-ink/20'
             )}
           >
+            {references.length > 0 && (
+              <ReferenceList references={references} onRemove={(index) =>
+                setReferences((prev) => prev.filter((_, i) => i !== index))
+              } />
+            )}
             <div className="flex items-end gap-0.5">
               <IconButton
                 label="提及成员 (@)"
@@ -1247,11 +1287,11 @@ export function RoomView({ id }: { id: string }) {
 
               <WorkspaceTools
                 scope={id}
-                recipient={room.title}
+                recipient={roomRecipient(room, audience)}
                 hermesAccount={hermesAccount}
                 variant="popover"
-                append={(value) => {
-                  setText((prev) => [prev, value].filter(Boolean).join('\n\n'))
+                append={(reference) => {
+                  setReferences((prev) => [...prev, reference])
                   requestAnimationFrame(() => {
                     resize()
                     textareaRef.current?.focus()
@@ -1278,7 +1318,7 @@ export function RoomView({ id }: { id: string }) {
                 className="block max-h-[200px] min-h-8 flex-1 resize-none bg-transparent px-1.5 py-[5px] text-[14px] leading-[22px] text-ink outline-none placeholder:text-ink-muted"
               />
 
-              {speaker && !text.trim() ? (
+              {speaker && !canSend ? (
                 <button
                   type="button"
                   onClick={() => stopRoom(id)}
@@ -1292,12 +1332,12 @@ export function RoomView({ id }: { id: string }) {
                 <button
                   type="button"
                   onClick={submit}
-                  disabled={!text.trim()}
+                  disabled={!canSend}
                   aria-label="发送"
                   title="发送（Enter）"
                   className={cn(
                     'press-icon grid size-8 shrink-0 place-items-center rounded-full transition-colors',
-                    text.trim()
+                    canSend
                       ? 'bg-accent-600 text-white hover:bg-accent-700'
                       : 'bg-hover text-ink-faint'
                   )}

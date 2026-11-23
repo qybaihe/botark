@@ -1,4 +1,5 @@
 import type { PlatformId } from '@adapters/types'
+import { createId } from '@shared/id'
 
 export interface RoomMember {
   botId: string
@@ -7,13 +8,30 @@ export interface RoomMember {
   name: string
   agentId?: string
   sessionId?: string
+  hermesSessionKey?: string
   cursor: number
+}
+
+export function freshRoomSession(platform: PlatformId) {
+  return {
+    cursor: 0, sessionId: undefined,
+    hermesSessionKey: platform === 'hermes' ? createId('hermes') : undefined
+  }
+}
+
+export interface RoomReference {
+  label: string
+  text: string
 }
 
 export interface RoomMessage {
   id: string
   author: string
   text: string
+  references?: RoomReference[]
+  authorBotId?: string
+  notice?: boolean
+  final?: boolean
   createdAt?: number
 }
 
@@ -97,10 +115,27 @@ export function mentions(text: string, members: RoomMember[]): RoomMember[] {
   return result
 }
 
+function messageWithReferences(message: RoomMessage): string {
+  return [message.text, ...(message.references ?? []).map((ref) =>
+    `[Reference: ${ref.label}]\n${ref.text}`
+  )].join('\n\n')
+}
+
+export function isHumanRoomMessage(message: RoomMessage): boolean {
+  return !message.authorBotId && (message.author === 'User' || message.author.startsWith('Slack '))
+}
+
+export function roomRecipient(room: CollabRoom, externalAudience?: string): string {
+  return [room.title, room.members.map((m) => m.name).join(', '), externalAudience].filter(Boolean).join(' · ')
+}
+
 export function turnPrompt(room: CollabRoom, member: RoomMember): string {
+  const start = Math.max(member.cursor, room.messages.length - 20)
+  const briefIndex = room.messages.findLastIndex(isHumanRoomMessage)
+  const missedBrief = briefIndex >= member.cursor && briefIndex < start ? room.messages[briefIndex] : undefined
   const context = room.messages
-    .slice(Math.max(member.cursor, room.messages.length - 20))
-    .map((m) => `[${m.author}] ${m.text}`)
+    .slice(start)
+    .map((m) => `[${m.author}] ${messageWithReferences(m)}`)
     .join('\n')
   return [
     `Collaboration room: ${room.title}. You are @${member.name}.`,
@@ -110,7 +145,7 @@ export function turnPrompt(room: CollabRoom, member: RoomMember): string {
         ? 'Coordinate the human brief. Mention a teammate to assign work or ask for progress. Their reply comes back to you. Use [FINAL] when ready.'
         : 'Answer the administrator’s request. Your reply returns to the administrator for review.'
       : 'Review, revise and choose a writer as needed. Mention a peer only to request their next turn. Start the final deliverable with [FINAL] on its own line.',
-    `Human brief: ${room.brief}`,
+    `Human brief: ${missedBrief?.references?.length ? messageWithReferences(missedBrief) : room.brief}`,
     context
   ].join('\n\n')
 }
@@ -123,9 +158,9 @@ export function stripFinalPrefix(text: string): string {
   return text.replace(/^\s*\[FINAL\]\s*/i, '')
 }
 
-export function roomMarkdown(room: CollabRoom): string {
-  const final = room.messages.find((m) => m.id === room.finalId)
+export function roomMarkdown(room: CollabRoom, finalId = room.finalId): string {
+  const final = room.messages.find((m) => m.id === finalId)
   return final
     ? `# ${room.title}\n\n${stripFinalPrefix(final.text)}\n`
-    : `# ${room.title}\n\n${room.messages.map((m) => `## ${m.author}\n\n${m.text}`).join('\n\n')}\n`
+    : `# ${room.title}\n\n${room.messages.map((m) => `## ${m.author}\n\n${messageWithReferences(m)}`).join('\n\n')}\n`
 }

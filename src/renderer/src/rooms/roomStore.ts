@@ -8,12 +8,15 @@ import { cancelPlatformTurn, useBotStore } from '@/store/botStore'
 import { createSafeStorage } from '@/store/delivery'
 import type { Bot } from '@/types'
 import {
+  freshRoomSession,
   isFinal,
   mentions,
+  roomRecipient,
   turnPrompt,
   type CollabRoom,
   type RoomMember,
-  type RoomMessage
+  type RoomMessage,
+  type RoomReference
 } from './model'
 import { requestedTool } from './toolRequests'
 
@@ -54,7 +57,9 @@ export const useRooms = create<RoomState>()(
                 id: String(r.id),
                 title: typeof r.title === 'string' && r.title.trim() ? r.title : '协作讨论',
                 members: Array.isArray(r.members) ? (r.members as RoomMember[]) : [],
-                messages: Array.isArray(r.messages) ? (r.messages as RoomMessage[]) : [],
+                messages: Array.isArray(r.messages) ? (r.messages as RoomMessage[]).map((m) =>
+                  r.finalId && m?.id === r.finalId ? { ...m, final: true } : m
+                ) : [],
                 mode: r.mode === 'manual' ? ('manual' as const) : ('auto' as const),
                 limit: typeof r.limit === 'number' && r.limit > 0 ? r.limit : 6,
                 brief: typeof r.brief === 'string' ? r.brief : '',
@@ -139,13 +144,11 @@ function reconcileRoomMemberList(
     }
     usedNames.add(nextName.toLowerCase())
     const resetSession = nextAccountId !== member.accountId || nextAgentId !== member.agentId
-    const nextSessionId = resetSession ? undefined : member.sessionId
     if (
       nextBotId !== member.botId ||
       nextAccountId !== member.accountId ||
       nextAgentId !== member.agentId ||
-      nextName !== member.name ||
-      nextSessionId !== member.sessionId
+      nextName !== member.name
     ) {
       changed = true
       return {
@@ -154,8 +157,7 @@ function reconcileRoomMemberList(
         accountId: nextAccountId,
         agentId: nextAgentId,
         name: nextName,
-        cursor: resetSession ? 0 : member.cursor,
-        sessionId: nextSessionId
+        ...(resetSession ? freshRoomSession(member.platform) : {})
       }
     }
     return member
@@ -166,7 +168,7 @@ function reconcileRoomMemberList(
 function initialMember(bot: Bot): RoomMember {
   return {
     botId: bot.id, platform: bot.platformId, accountId: bot.activeAccountId,
-    agentId: bot.selectedAgentId, name: bot.name.trim() || bot.id, cursor: 0
+    agentId: bot.selectedAgentId, name: bot.name.trim() || bot.id, ...freshRoomSession(bot.platformId)
   }
 }
 
@@ -287,7 +289,7 @@ export function clearRoomTranscript(id: string) {
     messages: [],
     finalId: undefined,
     brief: '',
-    members: r.members.map((m) => ({ ...m, cursor: 0, sessionId: undefined }))
+    members: r.members.map((m) => ({ ...m, ...freshRoomSession(m.platform) }))
   }))
 }
 
@@ -342,8 +344,7 @@ export function addRoom(title: string, ids: string[], mode: CollabRoom['mode'], 
       accountId: bot.activeAccountId,
       name: candidate,
       agentId: bot.selectedAgentId,
-      sessionId: undefined,
-      cursor: 0
+      ...freshRoomSession(bot.platformId)
     }
   })
   if (members.length < 2 || members.length > 6) throw new Error('请选择 2–6 位成员')
@@ -427,8 +428,7 @@ export function addMemberToRoom(roomId: string, botId: string): { ok: boolean; e
     accountId: bot.activeAccountId,
     name,
     agentId: bot.selectedAgentId,
-    sessionId: undefined,
-    cursor: 0
+    ...freshRoomSession(bot.platformId)
   }
   useRooms.setState((s) => ({
     rooms: s.rooms.map((r) => (r.id === roomId ? { ...r, members: [...r.members, member] } : r)),
@@ -474,8 +474,7 @@ export function moveMemberToRoom(
 
   const movedMember: RoomMember = {
     ...member,
-    cursor: 0,
-    sessionId: undefined
+    ...freshRoomSession(member.platform)
   }
 
   useRooms.setState((s) => ({
@@ -590,7 +589,7 @@ async function memberReply(room: CollabRoom, member: RoomMember, signal: AbortSi
           sessionId,
           accountId: member.accountId,
           agentId: member.agentId,
-          hermesSessionKey: room.id + '-' + member.botId,
+          hermesSessionKey: member.hermesSessionKey ?? room.id + '-' + member.botId,
           text: prompt,
           signal
         })
@@ -619,18 +618,24 @@ async function memberReply(room: CollabRoom, member: RoomMember, signal: AbortSi
 export async function submitBrief(
   id: string,
   input: string,
-  author = 'User',
-  messageId = createId('post')
+  { author = 'User', messageId = createId('post'), references = [] }: {
+    author?: string
+    messageId?: string
+    references?: RoomReference[]
+  } = {}
 ) {
   reconcileRooms(id)
   const room = roomById(id)
-  const text = input.trim()
+  const text = input.trim() || (references.length ? '请查看随附资料。' : '')
   if (!room || !text) return
   stopRoom(id)
   setError(id)
   const controller = new AbortController()
   runs.set(id, controller)
-  const message: RoomMessage = { id: messageId, author, text, createdAt: Date.now() }
+  const message: RoomMessage = {
+    id: messageId, author, text, createdAt: Date.now(),
+    ...(references.length ? { references } : {})
+  }
   update(id, (r) => ({ ...r, brief: text, finalId: undefined, messages: [...r.messages, message] }))
   const coordinator = room.coordinatorId ? room.members[0] : undefined
   const queue = coordinator ? [coordinator] : mentions(text, room.members)
@@ -655,13 +660,19 @@ export async function submitBrief(
       )
       return
     }
-    const previous = pendingTurns.get(id)
-    if (previous) await previous.catch(() => {})
-    controller.signal.throwIfAborted()
+    const failed = new Set<string>()
     for (let turn = 0; queue.length; turn++) {
-      const next = queue.shift()!
+      const pendingKey = JSON.stringify([id, turnLockKey(queue[0]!)])
+      const previous = pendingTurns.get(pendingKey)
+      if (previous) await previous.catch(() => {})
+      controller.signal.throwIfAborted()
       const current = roomById(id)
-      if (!current || turn >= current.limit) break
+      if (!current) break
+      if (turn >= current.limit) {
+        setError(id, `已达 ${current.limit} 轮上限，待回复：${queue.map((m) => '@' + m.name).join('、')}`)
+        break
+      }
+      const next = queue.shift()!
       const member = current.members.find((m) => m.botId === next.botId)
       if (!member) continue
       useRooms.setState((s) => ({
@@ -669,18 +680,34 @@ export async function submitBrief(
         turnProgress: { ...s.turnProgress, [id]: { turn: turn + 1, limit: current.limit } }
       }))
       const pending = memberReply(current, member, controller.signal)
-      pendingTurns.set(id, pending)
-      const reply = await pending.finally(() => {
-        if (pendingTurns.get(id) === pending) pendingTurns.delete(id)
-      })
+      pendingTurns.set(pendingKey, pending)
+      let reply: Awaited<typeof pending>
+      try {
+        reply = await pending
+      } catch (error) {
+        controller.signal.throwIfAborted()
+        if (member.botId === coordinator?.botId) throw error
+        failed.add(member.botId)
+        setError(id, `@${member.name}：${error instanceof Error ? error.message : String(error)}`)
+        update(id, (r) => ({ ...r, messages: [...r.messages, {
+          id: createId('post'), author: 'BotArk', notice: true,
+          text: `${member.name} 本轮未取得回复。`, createdAt: Date.now()
+        }] }))
+        if (coordinator && !queue.some((m) => m.botId === coordinator.botId)) queue.push(coordinator)
+        continue
+      } finally {
+        if (pendingTurns.get(pendingKey) === pending) pendingTurns.delete(pendingKey)
+      }
       controller.signal.throwIfAborted()
+      const done = (!coordinator || member.botId === coordinator.botId) && isFinal(reply.text)
       const post: RoomMessage = {
         id: createId('post'),
         author: member.name,
+        authorBotId: member.botId,
+        ...(done ? { final: true } : {}),
         text: reply.text,
         createdAt: Date.now()
       }
-      const done = (!coordinator || member.botId === coordinator.botId) && isFinal(post.text)
       update(id, (r) => ({
         ...r,
         finalId: done ? post.id : undefined,
@@ -694,16 +721,14 @@ export async function submitBrief(
       if (done) break
       const tool = requestedTool(post.text)
       const latest = roomById(id)!
-      if (tool && turn + 1 < latest.limit) {
+      if (tool) {
+        if (turn + 1 >= latest.limit) {
+          setError(id, `已达 ${latest.limit} 轮上限，工具 ${tool.name} 尚未执行。`)
+          break
+        }
         const bridge = getBridge()?.workspace
         if (!bridge) throw new Error('工作区不可用')
-        const recipient = [
-          room.title,
-          room.members.map((m) => m.name).join(', '),
-          useRooms.getState().externalAudiences[id]
-        ]
-          .filter(Boolean)
-          .join(' · ')
+        const recipient = roomRecipient(latest, useRooms.getState().externalAudiences[id])
         const result = await bridge.run(id, tool.name, tool.args, recipient)
         controller.signal.throwIfAborted()
         update(id, (r) => ({
@@ -720,7 +745,7 @@ export async function submitBrief(
         if (!queue.some((m) => m.botId === coordinator.botId)) queue.push(coordinator)
       } else if (latest.mode === 'auto') {
         for (const target of mentions(post.text, latest.members)) {
-          if (target.botId !== member.botId && !queue.some((m) => m.botId === target.botId)) {
+          if (target.botId !== member.botId && !failed.has(target.botId) && !queue.some((m) => m.botId === target.botId)) {
             queue.push(target)
           }
         }
@@ -730,7 +755,6 @@ export async function submitBrief(
     if (!controller.signal.aborted) setError(id, e instanceof Error ? e.message : String(e))
   } finally {
     if (runs.get(id) === controller) {
-      pendingTurns.delete(id)
       runs.delete(id)
       useRooms.setState((s) => ({
         speakers: { ...s.speakers, [id]: undefined },

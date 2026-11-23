@@ -252,11 +252,13 @@ export class HarkAdapter implements PlatformAdapter {
   }
 
   async sendMessage(message: OutgoingMessage): Promise<SendReceipt> {
+    message.signal?.throwIfAborted()
     this.bindBridgeEvents()
     const before = (await invokeHarkRpc(message.sessionId
       ? { accountId: message.accountId, op: 'conversationSnapshot', conversationId: message.sessionId }
       : { accountId: message.accountId, op: 'mainConversation' }
     )) as { conversationId?: string; messages: Array<{ id: string }> }
+    message.signal?.throwIfAborted()
     const conversationId = before.conversationId
     if (!conversationId) throw new AdapterError('network', 'No Hark conversation ID')
     const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone
@@ -294,6 +296,7 @@ export class HarkAdapter implements PlatformAdapter {
 
       accepted = true
       message.onAccepted?.()
+      message.signal?.throwIfAborted()
       if (sent?.idempotencyKey) afterIds.push(sent.idempotencyKey)
 
       const polled = (await invokeHarkRpc({
@@ -317,6 +320,7 @@ export class HarkAdapter implements PlatformAdapter {
         } | null
       }
 
+      message.signal?.throwIfAborted()
       this.emit({
         type: 'typing',
         sessionId: conversationId,

@@ -20,7 +20,7 @@ import { SegmentedControl } from '@/components/ui/SegmentedControl'
 import { cn } from '@/lib/cn'
 import { shortcutLabel } from '@/lib/shortcuts'
 import { useBotStore } from '@/store/botStore'
-import { roomMarkdown, type CollabRoom } from './model'
+import { roomMarkdown, roomRecipient, type CollabRoom } from './model'
 import { RoomAvatarCluster } from './RoomAvatarCluster'
 import {
   clearRoomTranscript,
@@ -37,8 +37,8 @@ import { WorkspaceTools } from './WorkspaceTools'
 
 type RoomTab = 'overview' | 'workspace' | 'slack'
 
-export function exportRoomMarkdownFile(room: CollabRoom) {
-  const url = URL.createObjectURL(new Blob([roomMarkdown(room)], { type: 'text/markdown' }))
+export function exportRoomMarkdownFile(room: CollabRoom, finalId?: string) {
+  const url = URL.createObjectURL(new Blob([roomMarkdown(room, finalId)], { type: 'text/markdown' }))
   const link = document.createElement('a')
   link.href = url
   link.download = `${room.title}.md`
@@ -52,6 +52,7 @@ export function RoomInspectorPanel({ room }: { room: CollabRoom }) {
   const accounts = useBotStore((s) => s.accounts)
   const selectBot = useBotStore((s) => s.selectBot)
   const speaker = useRooms((s) => s.speakers[room.id])
+  const audience = useRooms((s) => s.externalAudiences[room.id])
   const allRooms = useRooms((s) => s.rooms)
   const [tab, setTab] = useState<RoomTab>('overview')
   const [editing, setEditing] = useState(false)
@@ -429,13 +430,13 @@ export function RoomInspectorPanel({ room }: { room: CollabRoom }) {
           {tab === 'workspace' && (
             <WorkspaceTools
               scope={room.id}
-              recipient={room.title}
+              recipient={roomRecipient(room, audience)}
               hermesAccount={hermesAccount}
               variant="inspector"
-              append={(value) =>
+              append={(reference) =>
                 window.dispatchEvent(
                   new CustomEvent('botark:room-append-draft', {
-                    detail: { roomId: room.id, text: value }
+                    detail: { roomId: room.id, reference }
                   })
                 )
               }

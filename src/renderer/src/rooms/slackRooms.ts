@@ -1,7 +1,7 @@
 import type { SlackInbound, SlackState } from '@shared/slack'
 import type { SlackBridge } from '@shared/slack'
 import { submitBrief, useRooms } from './roomStore'
-import type { CollabRoom } from './model'
+import { freshRoomSession, type CollabRoom } from './model'
 
 export function receiveSlackMessage(event: SlackInbound): boolean {
   const rooms = useRooms.getState().rooms
@@ -12,10 +12,11 @@ export function receiveSlackMessage(event: SlackInbound): boolean {
   if (!room) {
     room = { ...parent, id, title: parent.title + ' · ' + event.text.slice(0, 40),
       messages: [], brief: '', finalId: undefined, slackParent: parent.id, slackThread: event.thread, slackChannel: event.channel,
-      members: parent.members.map((m) => ({ ...m, cursor: 0, sessionId: ['grok', 'dot'].includes(m.platform) ? m.sessionId : undefined })) }
+      members: parent.members.map((m) => ({ ...m, ...freshRoomSession(m.platform),
+        sessionId: ['grok', 'dot'].includes(m.platform) ? m.sessionId : undefined })) }
     useRooms.setState((s) => ({ rooms: [...s.rooms, room!], externalAudiences: { ...s.externalAudiences, [id]: 'Slack ' + event.channel } }))
   }
-  if (!room.messages.some((m) => m.id === event.id)) void submitBrief(id, event.text, 'Slack ' + event.user, event.id)
+  if (!room.messages.some((m) => m.id === event.id)) void submitBrief(id, event.text, { author: 'Slack ' + event.user, messageId: event.id })
   return true
 }
 

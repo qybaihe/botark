@@ -6,9 +6,10 @@ import type { WorkspaceTool } from '@shared/workspace'
 
 const MAX_BYTES = 96 * 1024
 const string = { type: 'string' }
+const workspacePath = { type: 'string', description: 'Relative to the selected workspace. Use "." for its root.' }
 function tool(name: string, description: string, fields: string[]): WorkspaceTool {
   return { name, description, inputSchema: {
-    type: 'object', properties: Object.fromEntries(fields.map((key) => [key, string])), required: fields, additionalProperties: false
+    type: 'object', properties: Object.fromEntries(fields.map((key) => [key, key === 'path' ? workspacePath : string])), required: fields, additionalProperties: false
   } }
 }
 export const fileTools = [

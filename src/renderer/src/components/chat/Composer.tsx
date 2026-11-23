@@ -358,8 +358,8 @@ export function Composer({ bot, account, typing = false, onSend, onCancel, onCon
               recipient={bot.name}
               variant="popover"
               hermesAccount={bot.platformId === 'hermes' ? bot.activeAccountId : undefined}
-              append={(value) => {
-                setText((prev) => [prev, value].filter(Boolean).join('\n\n'))
+              append={({ label, text: result }) => {
+                setText((prev) => [prev, `[${label}]\n${result}`].filter(Boolean).join('\n\n'))
                 requestAnimationFrame(() => {
                   resize()
                   textareaRef.current?.focus()

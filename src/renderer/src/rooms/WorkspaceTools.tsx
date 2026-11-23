@@ -37,11 +37,12 @@ import { Select } from '@/components/ui/Select'
 import { getBridge } from '@/lib/bridge'
 import { cn } from '@/lib/cn'
 import { usePrefsStore } from '@/store/prefsStore'
+import type { RoomReference } from './model'
 
 export interface WorkspaceToolsProps {
   scope: string
   recipient: string
-  append: (text: string) => void
+  append: (reference: RoomReference) => void
   hermesAccount?: string
   variant?: 'popover' | 'inspector'
 }
@@ -573,7 +574,7 @@ function WorkspaceStudioBody({
 }: {
   scope: string
   recipient: string
-  append: (text: string) => void
+  append: WorkspaceToolsProps['append']
   hermesAccount?: string
   state: WorkspaceView | undefined
   setState: (next: WorkspaceView) => void
@@ -790,7 +791,7 @@ function WorkspaceStudioBody({
         op === 'read'
           ? `@file ${targetPath}${lines ? `:${lines[1]}-${lines[2]}` : ''}`
           : `@folder ${targetPath}`
-      append(`[${label}]\n${result}`)
+      append({ label, text: result })
       onAfterAppend?.()
     })
 
@@ -823,7 +824,7 @@ function WorkspaceStudioBody({
         }
       }
       const result = await bridge.run(scope, mcpTool, parsedArgs, recipient)
-      append(`[${mcpTool}]\n${result}`)
+      append({ label: mcpTool, text: result })
       onAfterAppend?.()
     })
 

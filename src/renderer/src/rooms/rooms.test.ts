@@ -3,7 +3,7 @@ import { adapterRegistry } from '@adapters/registry'
 import type { IncomingMessage, OutgoingMessage, PlatformAdapter } from '@adapters/types'
 import type { Bot } from '@/types'
 import { useBotStore } from '@/store/botStore'
-import { mentions, roomMarkdown, stripFinalPrefix, type CollabRoom } from './model'
+import { mentions, roomMarkdown, stripFinalPrefix, turnPrompt, type CollabRoom } from './model'
 import {
   clearRoomTranscript,
   deleteRoom,
@@ -211,4 +211,135 @@ it('does not transfer administrator authority to a newly selected account', () =
   useBotStore.setState(({ bots }) => ({ bots: bots.map((b) => b.id === 'Muse'
     ? { ...b, accountIds: ['Muse', 'other'], activeAccountId: 'other' } : b) }))
   expect(useRooms.getState().rooms.find((r) => r.id === id)?.coordinatorId).toBeUndefined()
+})
+
+it('routes only the brief, while delivering approved reference text and preserving it in exports', async () => {
+  const send = vi.fn(async () => 'reviewed')
+  fixture('manual', send)
+  const references = [{ label: '@file sample.txt:3-4', text: '@Dot was mentioned in this example' }]
+  await submitBrief('room', '@Muse review the excerpt', { references })
+  const room = useRooms.getState().rooms[0]!
+  expect(send).toHaveBeenCalledTimes(1)
+  expect(send).toHaveBeenCalledWith(expect.objectContaining({
+    accountId: 'Muse', text: expect.stringContaining(references[0]!.text)
+  }))
+  expect(room.messages[0]?.text).toBe('@Muse review the excerpt')
+  expect(room.messages[0]?.references).toEqual(references)
+  expect(roomMarkdown(room)).toContain(references[0]!.text)
+})
+
+it('continues queued participants after a failed turn without retrying the failed member', async () => {
+  const calls: string[] = []
+  fixture('auto', async (msg) => {
+    calls.push(msg.accountId)
+    if (msg.accountId === 'Muse') throw new Error('transport timeout')
+    expect(msg.text).toContain('Muse 本轮未取得回复')
+    return '@Muse retry'
+  })
+  await submitBrief('room', '@Muse @Dot review')
+  expect(calls).toEqual(['Muse', 'Dot'])
+  expect(useRooms.getState().errors.room).toContain('transport timeout')
+})
+
+it('returns a delegated failure to the administrator and records only its accepted final', async () => {
+  const calls: OutgoingMessage[] = []
+  const id = adminFixture(async (msg) => {
+    calls.push(msg)
+    if (msg.accountId === 'Dot') throw new Error('offline')
+    return calls.length === 1 ? '@Dot review' : '[FINAL] partial result'
+  })
+  await submitBrief(id, 'Review')
+  expect(calls.map((m) => m.accountId)).toEqual(['Muse', 'Dot', 'Muse'])
+  expect(calls[2]?.text).toContain('Dot 本轮未取得回复')
+  const room = useRooms.getState().rooms.find((r) => r.id === id)!
+  expect(room.messages.at(-1)?.final).toBe(true)
+  expect(roomMarkdown(room)).toContain('partial result')
+})
+
+it('reports an unprocessed handoff or tool at the cap and stays quiet for a completed turn', async () => {
+  const run = vi.fn()
+  vi.stubGlobal('window', { electron: { workspace: { run, manage: async () => ({tools: []}) } } })
+  const replies = ['@Dot review', '[TOOL] {"name":"read","args":{"path":"notes.txt"}}', 'Complete']
+  fixture('auto', async () => replies.shift()!, 1)
+  await submitBrief('room', '@Muse start')
+  expect(useRooms.getState().errors.room).toContain('@Dot')
+  await submitBrief('room', '@Muse read')
+  expect(useRooms.getState().errors.room).toContain('read')
+  expect(run).not.toHaveBeenCalled()
+  await submitBrief('room', '@Muse finish')
+  expect(useRooms.getState().errors.room).toBeUndefined()
+})
+
+it('keeps the key of an existing Hermes room until its transcript is cleared', async () => {
+  const keys: (string | undefined)[] = []
+  fixture('manual', async (msg) => { keys.push(msg.hermesSessionKey); return 'noted' })
+  useRooms.setState(({ rooms }) => ({ rooms: rooms.map((r) => ({
+    ...r, members: r.members.map((m) => ({ ...m, platform: 'hermes' }))
+  })) }))
+  await submitBrief('room', '@Muse first')
+  await submitBrief('room', '@Muse second')
+  clearRoomTranscript('room')
+  await submitBrief('room', '@Muse new conversation')
+  await submitBrief('room', '@Muse follow up')
+  expect(keys.slice(0, 2)).toEqual(['room-Muse', 'room-Muse'])
+  expect(keys[2]).toBeTruthy()
+  expect(keys[2]).not.toBe(keys[0])
+  expect(keys[3]).toBe(keys[2])
+})
+
+it('lets another account take over while an interrupted member is still preparing a session', async () => {
+  let finish!: (session: { sessionId: string }) => void
+  const startSession = vi.fn(() => new Promise((resolve) => { finish = resolve }))
+  vi.stubGlobal('window', { electron: { muse: { startSession } } })
+  const respond = vi.fn(async () => '[FINAL] ready')
+  fixture('manual', respond)
+  useRooms.setState(({ rooms }) => ({ rooms: rooms.map((r) => ({
+    ...r, members: r.members.map((m) => m.botId === 'Muse' ? { ...m, platform: 'meta-muse' } : m)
+  })) }))
+  const preparing = submitBrief('room', '@Muse first')
+  const takeover = submitBrief('room', '@Dot take over')
+  try {
+    await vi.waitFor(() => expect(useRooms.getState().rooms[0]?.finalId).toBeTruthy(), { timeout: 300 })
+  } finally {
+    finish({ sessionId: 'stopped-session' })
+    await Promise.all([preparing, takeover])
+  }
+  expect(respond).toHaveBeenCalledTimes(1)
+  expect(useRooms.getState().rooms[0]?.members[0]?.sessionId).toBeUndefined()
+})
+
+it('leaves delegated [FINAL] messages as drafts and exports the selected historical final', async () => {
+  const replies = ['@Dot review', '[FINAL] draft', '[FINAL] first', '[FINAL] second']
+  const id = adminFixture(async () => replies.shift()!)
+  await submitBrief(id, 'First review')
+  const first = useRooms.getState().rooms.find((r) => r.id === id)!
+  expect(first.messages.find((m) => m.author === 'Dot')?.final).toBeUndefined()
+  await submitBrief(id, 'Update review')
+  const updated = useRooms.getState().rooms.find((r) => r.id === id)!
+  expect(updated.messages.find((m) => m.id === first.finalId)?.final).toBe(true)
+  expect(roomMarkdown(updated, first.finalId)).toContain('first')
+  expect(roomMarkdown(updated)).toContain('second')
+})
+
+it('includes the current brief’s excerpt for a late participant beyond the 20-message window', () => {
+  const excerpt = 'selected line from notes.txt'
+  const room: CollabRoom = { id: 'room', title: 'Review', members, mode: 'auto', limit: 24, brief: 'Review the excerpt',
+    messages: [
+      { id: 'brief', author: 'User', text: 'Review the excerpt', references: [{ label: 'notes.txt', text: excerpt }] },
+      ...Array.from({ length: 20 }, (_, i) => ({ id: String(i), author: 'Muse', text: 'progress' }))
+    ] }
+  expect(turnPrompt(room, members[1]!)).toContain(excerpt)
+  expect(turnPrompt(room, { ...members[1]!, cursor: 1 })).not.toContain(excerpt)
+})
+
+it('retains the confirmed v0.14 final when starting the next brief after hydration', async () => {
+  fixture('manual', async () => '[FINAL] updated')
+  const current = useRooms.getState()
+  const stored = { ...current.rooms[0]!, finalId: 'old', messages: [
+    { id: 'old', author: 'Muse', text: '[FINAL] earlier result' }
+  ] }
+  const hydrate = useRooms.persist.getOptions().merge!
+  useRooms.setState(hydrate({ rooms: [stored] }, current))
+  await submitBrief('room', '@Dot update')
+  expect(useRooms.getState().rooms[0]?.messages[0]?.final).toBe(true)
 })
