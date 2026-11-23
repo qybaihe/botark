@@ -1,5 +1,6 @@
 import { BrowserWindow, Notification, session as electronSession, shell, type WebContents } from 'electron'
 import type { MuseMainEvent, MuseSessionStatus, WebViewBounds } from '@shared/ipc'
+import { extractRawApprovalItems, mapMuseApproval } from '@shared/museApprovals'
 import { getAppWindowIcon } from '../appIcon'
 import {
   attachGoogleOAuthWebContentsGuard,
@@ -592,7 +593,11 @@ export class MuseSessionManager {
         ctaLabel: act.cta?.label
       })
       // Official client has no approvals.subscribe — needs_approval triggers refetch.
-      if (act.code === 'needs_approval') {
+      if (
+        act.code === 'needs_approval' ||
+        /approval|confirm|permission/i.test(act.code) ||
+        /approval|批准|审批/i.test(act.text ?? '')
+      ) {
         void this.refreshApprovals(accountId)
       }
       return
@@ -2139,27 +2144,18 @@ function extractChatEvents(raw: unknown): ChatEventLite[] {
 }
 
 export function normalizeApprovals(raw: unknown): Array<Record<string, unknown>> {
-  if (!raw || typeof raw !== 'object') return []
-  const obj = raw as Record<string, unknown>
-  const list =
-    (obj['pending'] as unknown[]) ||
-    (obj['pending_approvals'] as unknown[]) ||
-    (Array.isArray(raw) ? (raw as unknown[]) : [])
-  if (!Array.isArray(list)) return []
-  return list.map((item) => {
-    const a = (item ?? {}) as Record<string, unknown>
-    const id = String(a['approval_id'] ?? a['id'] ?? '')
-    const display = (a['display'] as Record<string, unknown> | undefined) ?? {}
-    const title = String(
-      display['title'] ??
-        a['action_description'] ??
-        a['action_label'] ??
-        a['title'] ??
-        a['approval_type'] ??
-        'Pending approval'
-    )
-    return { ...a, id, title }
-  })
+  return extractRawApprovalItems(raw)
+    .map((item) => {
+      const mapped = mapMuseApproval(item)
+      return {
+        ...item,
+        id: mapped.id,
+        title: mapped.title,
+        ...(mapped.detail ? { detail: mapped.detail } : {}),
+        ...(mapped.host ? { host: mapped.host } : {})
+      }
+    })
+    .filter((entry) => Boolean(entry.id))
 }
 
 function toSharedSchedule(s: NativeSchedule): MuseSchedule {

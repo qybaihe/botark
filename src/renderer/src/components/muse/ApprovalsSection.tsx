@@ -1,31 +1,14 @@
 import { useCallback, useEffect, useState } from 'react'
 import { adapterRegistry } from '@adapters/registry'
-import type { ApprovalDecision, MuseApproval } from '@adapters/types'
+import type { MuseApproval, MuseApprovalOption } from '@adapters/types'
+import { extractApprovalMetadata, resolveApprovalOptions } from '@shared/museApprovals'
+import { formatApprovalOptionLabel, formatApprovalTitle } from '@/components/chat/ApprovalCard'
 import { EmptyLine, Section } from '@/components/info/Section'
 import { Button } from '@/components/ui/Button'
 import { RefreshButton } from './RefreshButton'
 import { getBridge } from '@/lib/bridge'
 import { useBotStore } from '@/store/botStore'
 import { t } from '@/lib/i18n'
-
-const DEFAULT_DECISIONS: ApprovalDecision[] = ['allow_once', 'allow_always', 'deny']
-
-function labelFor(d: ApprovalDecision): string {
-  switch (d) {
-    case 'allow_once':
-      return t('Allow once')
-    case 'allow_session':
-      return t('Allow for this task')
-    case 'allow_always':
-      return t('Always allow this site')
-    case 'deny':
-      return t('Deny')
-    case 'deny_always':
-      return t('Always deny')
-    default:
-      return d
-  }
-}
 
 type HistoryItem = {
   id: string
@@ -40,24 +23,39 @@ function parseHistory(raw: unknown): HistoryItem[] {
   const o = raw as Record<string, unknown>
   const list =
     (Array.isArray(o['history']) && o['history']) ||
+    (Array.isArray(o['recent_approvals']) && o['recent_approvals']) ||
+    (Array.isArray(o['recent']) && o['recent']) ||
     (Array.isArray(o['items']) && o['items']) ||
     (Array.isArray(o['approvals']) && o['approvals']) ||
-    (Array.isArray(o['recent_approvals']) && o['recent_approvals']) ||
     (Array.isArray(raw) ? raw : [])
   const out: HistoryItem[] = []
   for (const row of list.slice(0, 20)) {
     if (!row || typeof row !== 'object') continue
     const r = row as Record<string, unknown>
     const display = (r['display'] as Record<string, unknown> | undefined) ?? {}
+    const pq = (display['permission_question'] as Record<string, unknown> | undefined) ?? {}
     const id = String(r['approval_id'] ?? r['id'] ?? out.length)
-    const title = String(display['title'] ?? r['action_description'] ?? r['title'] ?? r['host'] ?? id)
+    const title = String(
+      pq['text'] ??
+        display['title'] ??
+        display['action_description'] ??
+        r['action_description'] ??
+        r['title'] ??
+        r['host'] ??
+        id
+    )
     const decision = String(r['decision'] ?? r['status'] ?? 'decided')
     out.push({
       id,
       title,
       decision,
       host: typeof r['host'] === 'string' ? r['host'] : undefined,
-      atMs: typeof r['decided_at_ms'] === 'number' ? r['decided_at_ms'] : typeof r['updated_at_ms'] === 'number' ? r['updated_at_ms'] : undefined
+      atMs:
+        typeof r['decided_at_ms'] === 'number'
+          ? r['decided_at_ms']
+          : typeof r['updated_at_ms'] === 'number'
+            ? r['updated_at_ms']
+            : undefined
     })
   }
   return out
@@ -112,12 +110,16 @@ export function ApprovalsSection({
     })
   }, [refresh, status, accountId, platformId])
 
-  const decide = async (approvalId: string, decision: ApprovalDecision) => {
+  const decide = async (approvalId: string, option: MuseApprovalOption) => {
     const adapter = adapterRegistry.get(platformId)
     if (!adapter?.decideApproval) return
     setBusyId(approvalId)
+    setError(undefined)
     try {
-      await adapter.decideApproval(accountId, approvalId, decision)
+      await adapter.decideApproval(accountId, approvalId, option.kind, {
+        scope: option.scope,
+        opensUrl: option.opensUrl
+      })
       await refresh()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -186,17 +188,16 @@ export function ApprovalsSection({
       ) : (
         <ul className="flex flex-col gap-2 py-0.5">
           {pending.map((a) => {
-            const opts = a.decisionOptions?.length ? a.decisionOptions : DEFAULT_DECISIONS
-            const raw = (a.raw ?? {}) as Record<string, unknown>
-            const isEditable = Boolean(raw['editable_message'] || raw['is_editable'])
+            const opts = resolveApprovalOptions(a)
+            const meta = extractApprovalMetadata(a)
+            const isEditable = meta.editableMessage
             return (
               <li key={a.id} className="animate-step-in rounded-lg bg-status-attention/8 p-2.5">
-                <p className="text-[13px] font-medium text-ink">
-                  {a.host
-                    ? t('Allow Muse to share information with {host}?', { host: a.host })
-                    : a.title}
-                </p>
+                <p className="text-[13px] font-medium text-ink">{formatApprovalTitle(a)}</p>
                 {a.detail && <p className="mt-0.5 text-[12px] text-ink-secondary">{a.detail}</p>}
+                {meta.filename && (
+                  <p className="mt-0.5 truncate font-mono text-[11px] text-ink-muted">{meta.filename}</p>
+                )}
                 {editId === a.id && (
                   <div className="mt-2 flex flex-col gap-1.5">
                     <textarea
@@ -216,15 +217,19 @@ export function ApprovalsSection({
                   </div>
                 )}
                 <div className="mt-2 flex flex-wrap gap-1.5">
-                  {opts.map((d, i) => (
+                  {opts.map((opt, i) => (
                     <Button
-                      key={d}
+                      key={`${opt.kind}:${opt.scope ?? i}`}
                       size="sm"
-                      variant={i === 0 ? 'primary' : 'secondary'}
+                      variant={
+                        i === 0 && (opt.kind === 'allow_once' || opt.kind === 'allow_session' || opt.kind === 'allow_always')
+                          ? 'primary'
+                          : 'secondary'
+                      }
                       disabled={busyId === a.id}
-                      onClick={() => void decide(a.id, d)}
+                      onClick={() => void decide(a.id, opt)}
                     >
-                      {labelFor(d)}
+                      {formatApprovalOptionLabel(a, opt, meta.serviceName)}
                     </Button>
                   ))}
                   {isEditable && (

@@ -101,28 +101,12 @@ export interface IncomingMessage {
 
 
 /** Sentinel confirmation card (egress.approvals). */
-export type ApprovalDecision =
-  | 'allow_once'
-  | 'allow_session'
-  | 'allow_always'
-  | 'deny'
-  | 'deny_always'
-
-export interface MuseApproval {
-  id: string
-  status: 'pending' | 'approved' | 'denied' | 'timed_out' | string
-  title: string
-  detail?: string
-  approvalType?: string
-  /** Destination host for network (egress) cards, e.g. agent.qq.com. */
-  host?: string
-  /** Server-offered buttons (decision_options). Empty = allow_once/allow_always/deny. */
-  decisionOptions?: ApprovalDecision[]
-  /** Server reason / explanation text for the expandable detail. */
-  reason?: string
-  /** Raw payload for debugging / richer UI. */
-  raw?: unknown
-}
+export type {
+  ApprovalDecision,
+  MuseApproval,
+  MuseApprovalOption
+} from '@shared/museApprovals'
+import type { ApprovalDecision, MuseApproval } from '@shared/museApprovals'
 
 export interface MuseConnector {
   id: string
@@ -326,7 +310,12 @@ export interface PlatformAdapter {
   /** Muse / Sentinel: refresh and return pending confirmation cards. */
   listApprovals?(accountId: string): Promise<MuseApproval[]>
   /** Muse / Sentinel: Allow / Deny a confirmation card. */
-  decideApproval?(accountId: string, approvalId: string, decision: ApprovalDecision): Promise<void>
+  decideApproval?(
+    accountId: string,
+    approvalId: string,
+    decision: ApprovalDecision | string,
+    opts?: { scope?: string; opensUrl?: string }
+  ): Promise<void>
   /** Muse: list connectors (GitHub, Browser, …). */
   listConnectors?(accountId: string): Promise<MuseConnector[]>
   /** Ensure the embedded muse.ai session for this account is open (login / RPC). */

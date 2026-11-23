@@ -1,6 +1,12 @@
 import { statusAfterSendFailure } from '../sendFailure'
 import { createId } from '@shared/id'
 import type { MuseMainEvent } from '@shared/ipc'
+import {
+  KNOWN_APPROVAL_DECISIONS,
+  buildMuseApprovalDecideParams,
+  extractRawApprovalItems,
+  mapMuseApproval
+} from '@shared/museApprovals'
 import { getBotHubBridge } from './electronBridge'
 import {
   AdapterError,
@@ -30,47 +36,6 @@ import {
  * In plain browser (`npm run dev:web`) there is no bridge — methods throw
  * `unsupported` so the UI can fall back to mock via BOTHUB_USE_MOCK_MUSE.
  */
-
-function mapApproval(raw: Record<string, unknown>): MuseApproval {
-  const display = (raw['display'] as Record<string, unknown> | undefined) ?? {}
-  const payload = raw['payload'] as Record<string, unknown> | undefined
-  const title = String(
-    display['title'] ??
-      raw['action_description'] ??
-      raw['action_label'] ??
-      raw['title'] ??
-      raw['approval_type'] ??
-      'Pending approval'
-  )
-  const detail =
-    (typeof display['subtitle'] === 'string' && display['subtitle']) ||
-    (typeof raw['approval_phrase'] === 'string' ? raw['approval_phrase'] : undefined) ||
-    undefined
-  return {
-    id: String(raw['id'] ?? raw['approval_id'] ?? ''),
-    status: String(raw['status'] ?? 'pending'),
-    title,
-    detail,
-    approvalType:
-      typeof raw['approval_type'] === 'string'
-        ? raw['approval_type']
-        : typeof payload?.['type'] === 'string'
-          ? String(payload['type'])
-          : typeof raw['host'] === 'string'
-            ? String(raw['host'])
-            : undefined,
-    host: typeof raw['host'] === 'string' ? raw['host'] : undefined,
-    decisionOptions: Array.isArray(raw['decision_options'])
-      ? (raw['decision_options'] as unknown[]).filter((d): d is ApprovalDecision => typeof d === 'string')
-      : undefined,
-    reason:
-      (typeof raw['rich_explanation'] === 'string' && raw['rich_explanation']) ||
-      (typeof raw['short_explanation'] === 'string' && raw['short_explanation']) ||
-      (typeof raw['reason'] === 'string' && raw['reason']) ||
-      undefined,
-    raw
-  }
-}
 
 function mapConnector(raw: unknown, index: number): MuseConnector {
   const r = (raw ?? {}) as Record<string, unknown>
@@ -194,10 +159,16 @@ export class MuseAdapter implements PlatformAdapter {
         break
       }
       case 'approvals': {
-        const pending = (event.pending as Record<string, unknown>[]).map(mapApproval).filter((a) => a.id)
+        const pending = extractRawApprovalItems(event.pending)
+          .map(mapMuseApproval)
+          .filter((a) => a.id)
         this.pendingApprovals.set(event.accountId, pending)
         this.emit({ type: 'approvals', accountId: event.accountId, pending })
-        if (pending.length > 0) this.setStatus(event.accountId, 'attention')
+        if (pending.length > 0) {
+          this.setStatus(event.accountId, 'attention')
+        } else if (this.getStatus(event.accountId) === 'attention') {
+          this.setStatus(event.accountId, 'online')
+        }
         break
       }
       case 'sent':
@@ -274,11 +245,16 @@ export class MuseAdapter implements PlatformAdapter {
           ctaLabel: event.ctaLabel
         }
         this.emit({ type: 'activity', accountId: event.accountId, activity })
-        if (activity.code === 'needs_approval') {
+        const needsApproval =
+          activity.code === 'needs_approval' ||
+          /approval|confirm|permission/i.test(activity.code) ||
+          /approval|批准|审批/i.test(activity.text ?? '')
+        if (needsApproval) {
           void this.listApprovals(event.accountId).catch(() => {})
-        }
-        if (event.busy) this.setStatus(event.accountId, 'busy')
-        else {
+          this.setStatus(event.accountId, 'attention')
+        } else if (event.busy) {
+          this.setStatus(event.accountId, 'busy')
+        } else {
           const pending = this.pendingApprovals.get(event.accountId) ?? []
           this.setStatus(event.accountId, pending.length ? 'attention' : 'online')
         }
@@ -517,7 +493,9 @@ export class MuseAdapter implements PlatformAdapter {
 
   async listApprovals(accountId: string): Promise<MuseApproval[]> {
     const status = this.getStatus(accountId)
-    if (status === 'offline' || status === 'error') return []
+    // Allow fetching even when status === 'error' (e.g. a previous chat turn timed out
+    // while Sentinel was waiting for approval); only skip when signed out / offline.
+    if (status === 'offline') return []
     let raw: unknown
     try {
       raw = await this.bridge().rpc({ accountId, method: 'egress.approvals', params: {} })
@@ -525,38 +503,58 @@ export class MuseAdapter implements PlatformAdapter {
       console.warn('[muse] listApprovals', error)
       return this.pendingApprovals.get(accountId) ?? []
     }
-    const obj = (raw ?? {}) as Record<string, unknown>
-    const list = (obj['pending'] as unknown[]) || (obj['pending_approvals'] as unknown[]) || []
-    const pending = (Array.isArray(list) ? list : []).map((item) => mapApproval((item ?? {}) as Record<string, unknown>))
+    const pending = extractRawApprovalItems(raw)
+      .map(mapMuseApproval)
+      .filter((a) => a.id)
     this.pendingApprovals.set(accountId, pending)
     this.emit({ type: 'approvals', accountId, pending })
-    if (pending.length) this.setStatus(accountId, 'attention')
+    if (pending.length) {
+      this.setStatus(accountId, 'attention')
+    } else if (status === 'attention' || status === 'error') {
+      this.setStatus(accountId, 'online')
+    }
     return pending
   }
 
-  async decideApproval(accountId: string, approvalId: string, decision: ApprovalDecision): Promise<void> {
+  async decideApproval(
+    accountId: string,
+    approvalId: string,
+    decision: ApprovalDecision | string,
+    opts?: { scope?: string; opensUrl?: string }
+  ): Promise<void> {
+    let approval = (this.pendingApprovals.get(accountId) ?? []).find((a) => a.id === approvalId)
+    if (!approval) {
+      try {
+        const detail = await this.bridge().rpc({
+          accountId,
+          method: 'egress.approval',
+          params: { approval_id: approvalId }
+        })
+        if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
+          approval = mapMuseApproval(detail as Record<string, unknown>)
+        }
+      } catch {
+        /* fallback to default scope resolution */
+      }
+    }
+
+    const matchedOption = approval?.decisionOptionDetails?.find(
+      (o) => o.kind === decision && (!opts?.scope || o.scope === opts.scope)
+    )
+    const opensUrl = opts?.opensUrl ?? matchedOption?.opensUrl
+    if (opensUrl) {
+      await this.bridge().openHttps?.(opensUrl)
+      if (!KNOWN_APPROVAL_DECISIONS.has(decision as ApprovalDecision)) {
+        await this.listApprovals(accountId)
+        return
+      }
+    }
+
+    const params = buildMuseApprovalDecideParams(approval, approvalId, decision, opts?.scope)
     await this.bridge().rpc({
       accountId,
       method: 'egress.approval.decide',
-      params: {
-        approval_id: approvalId,
-        decision,
-        // Official client: "Always allow this site" scopes to the destination domain
-        // (incl. subdomains); space-reader cards scope to the entity.
-        ...(decision === 'allow_always'
-          ? (() => {
-              const raw = (this.pendingApprovals.get(accountId) ?? []).find((a) => a.id === approvalId)?.raw as
-                | Record<string, unknown>
-                | undefined
-              const scope = raw?.['space_reader_grant_eligible'] === true ? 'entity' : 'destination_domain'
-              return { always_scope: scope, allow_always_scope: scope }
-            })()
-          : {}),
-        reason: null,
-        expires_at_ms: null,
-        notification_channel: 'ui',
-        expected_message_revision: null
-      }
+      params
     })
     await this.listApprovals(accountId)
   }
