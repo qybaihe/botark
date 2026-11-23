@@ -170,7 +170,7 @@ function broadcast(payload: unknown): void {
 
 async function statusFor(accountId: string): Promise<HarkAuthStatus> {
   const hasProxy = Boolean(await loadAccountProxyUrl(accountId).catch(() => true))
-  const probe = await probeHarkSession(accountId)
+  const probe = await probeHarkSession(accountId, { reportConnectionErrors: true })
   if ('signedIn' in probe) return { accountId, signedIn: false, hasProxy }
   return {
     accountId,

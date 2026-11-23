@@ -18,7 +18,7 @@ import {
   getValidSandAccessToken,
   grokFetcherForAccount
 } from './grokSandAuth'
-import { parseGrokTranscriptEntry } from './grokTranscriptDecoder'
+import { parseGrokTranscriptEntry, type ParsedGrokTranscriptEntry } from './grokTranscriptDecoder'
 import {
   ensureGrokAccountWatch,
   getGrokAccountWatch,
@@ -96,7 +96,54 @@ function fail(error: unknown): GrokRpcResponse {
 
 const GROK_REPLY_SETTLE_MS = 12_000
 
-async function watchUntilReply(
+function parseBigIntSeq(val?: string): bigint {
+  if (!val) return 0n
+  try {
+    return BigInt(val)
+  } catch {
+    return 0n
+  }
+}
+
+async function hydrateOmittedEntry(
+  client: GrokConnectClient,
+  agentId: string,
+  sessionId: string,
+  stub: ParsedGrokTranscriptEntry
+): Promise<ParsedGrokTranscriptEntry> {
+  try {
+    let beforeSeq: string | undefined
+    try {
+      const s = BigInt(stub.seq || '0')
+      if (s > 0n) beforeSeq = (s + 1n).toString()
+    } catch {
+      beforeSeq = undefined
+    }
+    const page = (await client.listTranscriptEntries({
+      agentId,
+      sessionId: sessionId || undefined,
+      beforeSeq,
+      limit: 5
+    })) as Record<string, unknown>
+    const entries = Array.isArray(page['entries'])
+      ? (page['entries'] as Array<Record<string, unknown>>)
+      : []
+    const match = entries.find((raw) => {
+      const eid = String(raw['entry_id'] ?? raw['entryId'] ?? '')
+      const seq = String(raw['seq'] ?? '')
+      return (eid && eid === stub.entryId) || (seq && seq === stub.seq)
+    })
+    if (match && !(match['body_omitted'] ?? match['bodyOmitted'])) {
+      const hydrated = parseGrokTranscriptEntry(match, agentId, sessionId)
+      if (hydrated) return hydrated
+    }
+  } catch {
+    /* fallback to stub if hydration RPC fails */
+  }
+  return stub
+}
+
+export async function watchUntilReply(
   client: GrokConnectClient,
   args: {
     accountId: string
@@ -144,6 +191,8 @@ async function watchUntilReply(
   let turnFailed: { code: string; summary: string } | undefined
   let isAgentRunning = false
   let idleSettleTimer: ReturnType<typeof setTimeout> | undefined
+  const afterSeq = parseBigIntSeq(args.afterUpdatedSeq)
+  let seenUserAnchor = false
 
   const armSettle = (delayMs: number = GROK_REPLY_SETTLE_MS) => {
     if (idleSettleTimer) clearTimeout(idleSettleTimer)
@@ -212,9 +261,30 @@ async function watchUntilReply(
         unknown
       >[]
 
-      for (const raw of entries) {
-        const parsed = parseGrokTranscriptEntry(raw, args.agentId, args.sessionId)
-        if (!parsed) continue
+      const parsedEntries = entries
+        .map((raw) => parseGrokTranscriptEntry(raw, args.agentId, args.sessionId))
+        .filter((x): x is ParsedGrokTranscriptEntry => Boolean(x))
+      const anchorIdx =
+        isReplay && args.afterMessageId
+          ? parsedEntries.findIndex(
+              (p) => p.entryId === args.afterMessageId || p.clientNonce === args.afterMessageId
+            )
+          : -1
+
+      for (let idx = 0; idx < parsedEntries.length; idx++) {
+        let parsed = parsedEntries[idx]!
+
+        if (
+          args.afterMessageId &&
+          (parsed.entryId === args.afterMessageId || parsed.clientNonce === args.afterMessageId)
+        ) {
+          seenUserAnchor = true
+          continue
+        }
+        if (isReplay && anchorIdx >= 0 && idx < anchorIdx) continue
+
+        const entrySeq = parseBigIntSeq(parsed.updatedSeq || parsed.seq)
+        if (afterSeq > 0n && entrySeq > 0n && entrySeq <= afterSeq) continue
 
         if (parsed.role === 'tool' && parsed.toolCall) {
           collectedTools.set(parsed.toolCall.id, parsed.toolCall)
@@ -222,13 +292,14 @@ async function watchUntilReply(
         }
 
         if (parsed.role !== 'assistant') continue
-        if (
-          args.afterMessageId &&
-          (parsed.entryId === args.afterMessageId || parsed.clientNonce === args.afterMessageId)
-        ) {
-          continue
+        if (isReplay && !parsed.isStreaming) {
+          if (afterSeq > 0n && entrySeq === 0n && !seenUserAnchor) continue
+          if (afterSeq === 0n && args.afterMessageId && !seenUserAnchor) continue
         }
-        if (isReplay && !parsed.isStreaming && args.afterUpdatedSeq !== '0') continue
+
+        if (parsed.bodyOmitted) {
+          parsed = await hydrateOmittedEntry(client, args.agentId, args.sessionId, parsed)
+        }
 
         const resolvedMedia = watchHandle
           ? await watchHandle.resolveMediaUrls(
@@ -610,7 +681,10 @@ async function runGrokRpcOnce(request: GrokRpcRequest): Promise<GrokRpcResponse>
 
         const hydrated: Array<Record<string, unknown>> = []
         let pendingTools: MuseToolCallView[] = []
-        for (const item of parsedList) {
+        for (const rawItem of parsedList) {
+          const item = rawItem.bodyOmitted
+            ? await hydrateOmittedEntry(client, request.agentId, request.sessionId ?? defaultSession, rawItem)
+            : rawItem
           if (item.role === 'tool' && item.toolCall) {
             pendingTools.push(item.toolCall)
             continue

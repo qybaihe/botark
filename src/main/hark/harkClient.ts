@@ -18,8 +18,45 @@ export const HARK_ORIGIN = 'https://app.hark.com'
 export const HARK_API_BASE = `${HARK_ORIGIN}/api`
 export const HARK_LOGIN_URL = `${HARK_ORIGIN}/login`
 export const HARK_CLIENT_VERSION = '0.1.21'
-export const HARK_USER_AGENT =
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Hark/0.1.21 Chrome/134.0.6998.88 Electron/35.1.2 Safari/537.36'
+const DEFAULT_HARK_CHROME_VERSION = '147.0.0.0'
+const DEFAULT_HARK_ELECTRON_VERSION = '45.2.1'
+
+export function buildHarkPlatformStrings(platform: NodeJS.Platform = process.platform): {
+  osToken: string
+  secChUaPlatform: '"Windows"' | '"macOS"' | '"Linux"'
+} {
+  if (platform === 'win32') {
+    return { osToken: 'Windows NT 10.0; Win64; x64', secChUaPlatform: '"Windows"' }
+  }
+  if (platform === 'darwin') {
+    return { osToken: 'Macintosh; Intel Mac OS X 10_15_7', secChUaPlatform: '"macOS"' }
+  }
+  return { osToken: 'X11; Linux x86_64', secChUaPlatform: '"Linux"' }
+}
+
+export function buildHarkUserAgent(
+  opts: { platform?: NodeJS.Platform; chromeVersion?: string; electronVersion?: string } = {}
+): string {
+  const { osToken } = buildHarkPlatformStrings(opts.platform)
+  const rawChrome = opts.chromeVersion ?? process.versions?.chrome
+  const chromeVer =
+    rawChrome && /^\d+(\.\d+)*$/.test(rawChrome) ? rawChrome : DEFAULT_HARK_CHROME_VERSION
+  const rawElectron = opts.electronVersion ?? process.versions?.electron
+  const electronVer =
+    rawElectron && /^\d+(\.\d+)*$/.test(rawElectron) ? rawElectron : DEFAULT_HARK_ELECTRON_VERSION
+  return `Mozilla/5.0 (${osToken}) AppleWebKit/537.36 (KHTML, like Gecko) Hark/${HARK_CLIENT_VERSION} Chrome/${chromeVer} Electron/${electronVer} Safari/537.36`
+}
+
+export function buildHarkSecChUa(chromeVersion = process.versions?.chrome): string {
+  const full =
+    chromeVersion && /^\d+(\.\d+)*$/.test(chromeVersion)
+      ? chromeVersion
+      : DEFAULT_HARK_CHROME_VERSION
+  const major = full.split('.')[0] || '147'
+  return `"Chromium";v="${major}", "Not:A-Brand";v="24"`
+}
+
+export const HARK_USER_AGENT = buildHarkUserAgent()
 
 export class HarkApiError extends Error {
   readonly status: number
@@ -91,24 +128,42 @@ export async function preparedSessionForAccount(accountId: string): Promise<Sess
   return sessionForAccount(accountId)
 }
 
-function harkClientHeaders(extra?: Record<string, string>): Record<string, string> {
+export function buildHarkClientHeaders(
+  extra?: Record<string, string>,
+  opts: {
+    platform?: NodeJS.Platform
+    chromeVersion?: string
+    electronVersion?: string
+    locale?: string
+    timezone?: string
+  } = {}
+): Record<string, string> {
+  const { secChUaPlatform } = buildHarkPlatformStrings(opts.platform)
   return {
     Accept: 'application/json',
     'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
     Origin: HARK_ORIGIN,
     Referer: `${HARK_ORIGIN}/`,
-    'User-Agent': HARK_USER_AGENT,
-    'X-Hark-Locale': localeHeader(),
-    'X-Hark-Timezone': timezoneName(),
+    'User-Agent': buildHarkUserAgent({
+      platform: opts.platform,
+      chromeVersion: opts.chromeVersion,
+      electronVersion: opts.electronVersion
+    }),
+    'X-Hark-Locale': opts.locale ?? localeHeader(),
+    'X-Hark-Timezone': opts.timezone ?? timezoneName(),
     'X-Hark-Client-Version': HARK_CLIENT_VERSION,
-    'Sec-Ch-Ua': '"Chromium";v="134", "Not:A-Brand";v="24"',
+    'Sec-Ch-Ua': buildHarkSecChUa(opts.chromeVersion),
     'Sec-Ch-Ua-Mobile': '?0',
-    'Sec-Ch-Ua-Platform': '"macOS"',
+    'Sec-Ch-Ua-Platform': secChUaPlatform,
     'Sec-Fetch-Site': 'same-origin',
     'Sec-Fetch-Mode': 'cors',
     'Sec-Fetch-Dest': 'empty',
     ...(extra ?? {})
   }
+}
+
+function harkClientHeaders(extra?: Record<string, string>): Record<string, string> {
+  return buildHarkClientHeaders(extra)
 }
 
 const HARK_REQUEST_TIMEOUT_MS = 30_000
@@ -121,6 +176,7 @@ async function harkFetch(
     query?: Record<string, string | undefined>
     body?: unknown
     signal?: AbortSignal
+    interactive?: boolean
   } = {}
 ): Promise<unknown> {
   const url = new URL(path.startsWith('http') ? path : `${HARK_API_BASE}${path}`)
@@ -134,7 +190,7 @@ async function harkFetch(
     init.body !== undefined ? { 'Content-Type': 'application/json' } : undefined
   )
   const method = init.method ?? (init.body !== undefined ? 'POST' : 'GET')
-  const maxAttempts = method === 'GET' ? 3 : 1
+  const maxAttempts = method === 'GET' ? (init.interactive ? 2 : 3) : 1
   let lastErr: unknown
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -143,11 +199,12 @@ async function harkFetch(
     }
     // Every attempt gets its own deadline; a stalled request used to leave
     // the bubble on "Sending" and the account `pending` until restart.
-    const deadline = AbortSignal.timeout(HARK_REQUEST_TIMEOUT_MS)
+    const deadline = AbortSignal.timeout(init.interactive ? 12000 : HARK_REQUEST_TIMEOUT_MS)
     const signal = init.signal ? AbortSignal.any([init.signal, deadline]) : deadline
     try {
       const response = await ses.fetch(url.toString(), {
         method,
+        credentials: 'include',
         headers,
         body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
         signal
@@ -205,9 +262,21 @@ export async function callHarkApi(
 
 export async function getAuthSession(accountId: string): Promise<HarkAuthSession> {
   const ses = await preparedSessionForAccount(accountId)
-  const data = await harkFetch(ses, '/auth/get-session')
+  const data = await harkFetch(ses, '/auth/get-session', { interactive: true })
   if (data == null) return null
-  if (typeof data !== 'object') return null
+  if (typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error('Hark returned an invalid session response')
+  }
+  const rec = data as Record<string, unknown>
+  if (rec['user'] || rec['session']) {
+    return data as HarkAuthSession
+  }
+  if (rec['data'] && typeof rec['data'] === 'object') {
+    const inner = rec['data'] as Record<string, unknown>
+    if (inner['user'] || inner['session']) {
+      return inner as unknown as HarkAuthSession
+    }
+  }
   return data as HarkAuthSession
 }
 
@@ -371,8 +440,8 @@ export async function fetchConversationSnapshotMessages(
   return snap.messages
 }
 
-export async function getProfile(accountId: string): Promise<unknown> {
-  return harkFetch(await preparedSessionForAccount(accountId), '/profile')
+export async function getProfile(accountId: string, interactive = false): Promise<unknown> {
+  return harkFetch(await preparedSessionForAccount(accountId), '/profile', { interactive })
 }
 
 export async function listConversations(accountId: string): Promise<unknown> {
@@ -1386,7 +1455,7 @@ export async function readHarkStream(
 ): Promise<void> {
   const url = new URL(HARK_API_BASE + '/sync/conversation')
   url.search = new URLSearchParams({ conversationId, manager, dial, v: '2', mode: 'in_tab', ids: '1', beat: '5' }).toString()
-  const response = await ses.fetch(url.toString(), { signal, headers: harkClientHeaders({
+  const response = await ses.fetch(url.toString(), { credentials: 'include', signal, headers: harkClientHeaders({
     Accept: 'text/event-stream', 'Cache-Control': 'no-cache'
   }) })
   if (!response.ok || !response.body || !response.headers.get('content-type')?.includes('text/event-stream')) {

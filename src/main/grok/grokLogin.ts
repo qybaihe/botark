@@ -1,5 +1,12 @@
 import { BrowserWindow, session as electronSession, shell, type WebContents } from 'electron'
-import { installGoogleOAuthHeaderGuard } from '../googleOAuthUaGuard'
+import { getAppWindowIcon } from '../appIcon'
+import {
+  attachGoogleOAuthWebContentsGuard,
+  buildGoogleFallbackBannerScript,
+  GOOGLE_BLOCK_CHECK_SCRIPT,
+  installGoogleOAuthHeaderGuard,
+  isGoogleBlockedOrPasskeyText
+} from '../googleOAuthUaGuard'
 import { applyProxyToPartition } from '../muse/accountProxy'
 import { partitionForAccount } from '../webContentsViewManager'
 import { setGrokMainAuth } from './grokAuthStore'
@@ -72,14 +79,6 @@ export function accessTokenFromWorkosCookie(
   return parseWorkosCookieOrToken(raw)
 }
 
-function cleanChromeUserAgent(rawUa: string): string {
-  return rawUa
-    .replace(/\s*Electron\/[^\s]+/gi, '')
-    .replace(/\s*(?:BotArk|BotHub)\/[^\s]+/gi, '')
-    .replace(/\s{2,}/g, ' ')
-    .trim()
-}
-
 export function cancelGrokLogin(accountId: string): void {
   const flight = activeLogins.get(accountId)
   if (!flight) return
@@ -120,8 +119,6 @@ export async function openGrokLoginWindow(
 
   const partition = partitionForAccount(accountId)
   const ses = electronSession.fromPartition(partition)
-  const sessionCleanUa = cleanChromeUserAgent(ses.getUserAgent())
-  ses.setUserAgent(sessionCleanUa)
   installGoogleOAuthHeaderGuard(ses)
   const machineId = getOrCreateGrokMachineId(accountId)
   const { verifier, challenge, uuid } = createPkce()
@@ -261,6 +258,7 @@ export async function openGrokLoginWindow(
     return
   }
 
+  const windowIcon = getAppWindowIcon()
   win = new BrowserWindow({
     width: 920,
     height: 720,
@@ -269,6 +267,7 @@ export async function openGrokLoginWindow(
     title: '登录 Grok Bot',
     backgroundColor: '#f7f7f8',
     autoHideMenuBar: true,
+    ...(windowIcon ? { icon: windowIcon } : {}),
     parent: parent && !parent.isDestroyed() ? parent : undefined,
     webPreferences: {
       partition,
@@ -278,9 +277,6 @@ export async function openGrokLoginWindow(
       backgroundThrottling: false
     }
   })
-
-  const cleanUa = cleanChromeUserAgent(win.webContents.getUserAgent())
-  win.webContents.setUserAgent(cleanUa)
 
   activeLogins.set(accountId, {
     win,
@@ -301,6 +297,7 @@ export async function openGrokLoginWindow(
   }
 
   guardDeepLinks(win.webContents)
+  attachGoogleOAuthWebContentsGuard(win.webContents, ses)
 
   // Keep OAuth popups (Google, X, Apple, GitHub, WorkOS) inside the same partition
   // as clean child windows so `window.opener` works natively without external browser bounces.
@@ -309,13 +306,14 @@ export async function openGrokLoginWindow(
       pollWake.wake()
       return { action: 'deny' }
     }
-    if (/^https?:\/\//i.test(url)) {
+    if (url === 'about:blank' || /^https?:\/\//i.test(url)) {
       return {
         action: 'allow',
         overrideBrowserWindowOptions: {
           width: 520,
           height: 680,
           title: '安全授权',
+          ...(windowIcon ? { icon: windowIcon } : {}),
           parent: win && !win.isDestroyed() ? win : undefined,
           autoHideMenuBar: true,
           webPreferences: {
@@ -331,24 +329,41 @@ export async function openGrokLoginWindow(
   })
 
   let handedOffToBrowser = false
-  const maybeFallbackOnGoogleBlock = async (wc: WebContents): Promise<void> => {
+  let lastBlockCheckAt = 0
+  const maybeFallbackOnGoogleBlock = async (
+    wc: WebContents,
+    childWin?: BrowserWindow
+  ): Promise<void> => {
     if (handedOffToBrowser || settling || aborted || wc.isDestroyed()) return
     try {
       const url = wc.getURL()
-      if (!/^https:\/\/accounts\.google\.com\//i.test(url)) return
-      const blocked = (await wc.executeJavaScript(
-        `(() => {
-          const text = (document.body && document.body.innerText) || '';
-          return (
-            text.includes('此浏览器或应用可能不安全') ||
-            text.includes('This browser or app may not be secure')
-          );
-        })()`,
-        true
-      )) as boolean
-      if (blocked && !handedOffToBrowser && !settling && !aborted) {
+      if (!/^https:\/\/accounts\.(?:google|youtube)\.com\//i.test(url)) return
+      const now = Date.now()
+      if (now - lastBlockCheckAt < 150) return
+      lastBlockCheckAt = now
+      const bodyText = (await wc.executeJavaScript(GOOGLE_BLOCK_CHECK_SCRIPT, true)) as string
+      if (!isGoogleBlockedOrPasskeyText(bodyText, url)) return
+      if (!handedOffToBrowser && !settling && !aborted) {
         handedOffToBrowser = true
         void shell.openExternal(deepUrl)
+        if (childWin && !childWin.isDestroyed()) {
+          try {
+            childWin.close()
+          } catch {
+            /* ignore */
+          }
+        }
+        if (win && !win.isDestroyed()) {
+          void win.webContents
+            .executeJavaScript(
+              buildGoogleFallbackBannerScript({
+                title: '已自动切换至系统默认浏览器完成 Google 授权',
+                detail: '请在系统浏览器中完成登录并确认授权，完成后 BotArk 将自动同步账号与 Bot。'
+              }),
+              true
+            )
+            .catch(() => undefined)
+        }
       }
     } catch {
       /* ignore */
@@ -357,11 +372,15 @@ export async function openGrokLoginWindow(
 
   win.webContents.on('did-create-window', (childWin) => {
     childPopups.add(childWin)
-    childWin.webContents.setUserAgent(cleanUa)
     guardDeepLinks(childWin.webContents)
-    childWin.webContents.on('did-finish-load', () => {
-      void maybeFallbackOnGoogleBlock(childWin.webContents)
-    })
+    attachGoogleOAuthWebContentsGuard(childWin.webContents, ses)
+    const onChildNav = () => {
+      void maybeFallbackOnGoogleBlock(childWin.webContents, childWin)
+    }
+    childWin.webContents.on('did-finish-load', onChildNav)
+    childWin.webContents.on('did-navigate', onChildNav)
+    childWin.webContents.on('did-navigate-in-page', onChildNav)
+    childWin.webContents.on('did-redirect-navigation', onChildNav)
     childWin.on('closed', () => {
       childPopups.delete(childWin)
       pollWake.wake()
@@ -436,6 +455,11 @@ export async function openGrokLoginWindow(
   win.webContents.on('did-navigate', () => {
     pollWake.wake()
     void checkCookiesAndAutoConfirm()
+    if (win && !win.isDestroyed()) void maybeFallbackOnGoogleBlock(win.webContents)
+  })
+  win.webContents.on('did-redirect-navigation', () => {
+    pollWake.wake()
+    if (win && !win.isDestroyed()) void maybeFallbackOnGoogleBlock(win.webContents)
   })
 
   autoConfirmTimer = setInterval(() => {

@@ -1,4 +1,5 @@
 import { BrowserWindow } from 'electron'
+import { getAppWindowIcon } from '../appIcon'
 import {
   extractLoginCodes,
   pickFreshCode,
@@ -101,10 +102,12 @@ export class InboxReader {
   async read(url: string, signal?: AbortSignal): Promise<string[]> {
     if (signal?.aborted) throw new Aborted()
     if (!this.win || this.win.isDestroyed()) {
+      const windowIcon = getAppWindowIcon()
       this.win = new BrowserWindow({
         show: false,
         width: 1000,
         height: 900,
+        ...(windowIcon ? { icon: windowIcon } : {}),
         // Shared in-memory partition: one per run leaked a session each time.
         webPreferences: { partition: INBOX_PARTITION, sandbox: true, contextIsolation: true, backgroundThrottling: false }
       })

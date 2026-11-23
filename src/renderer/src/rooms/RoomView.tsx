@@ -49,6 +49,7 @@ import { useBotStore } from '@/store/botStore'
 import {
   isFinal,
   mentions,
+  splitMentionSegments,
   stripFinalPrefix,
   type CollabRoom,
   type RoomMember,
@@ -56,6 +57,7 @@ import {
 } from './model'
 import { RoomAvatarCluster } from './RoomAvatarCluster'
 import { exportRoomMarkdownFile } from './RoomInspectorPanel'
+import { applyDropOnRoom, isRoomDropDrag, showRoomDndNotice, useRoomDndNotice } from './roomDnd'
 import {
   addRoom,
   deleteRoom,
@@ -95,6 +97,90 @@ const ROOM_SCENARIOS = [
 /* Sidebar Room List                                                          */
 /* -------------------------------------------------------------------------- */
 
+/** Drop-target props so a bot / room member can be dragged onto a group chat. */
+function useRoomDropTarget(roomId: string) {
+  const [over, setOver] = useState(false)
+  return {
+    over,
+    props: {
+      onDragOver: (e: React.DragEvent<HTMLElement>) => {
+        if (!isRoomDropDrag(e.dataTransfer.types)) return
+        e.preventDefault()
+        e.stopPropagation()
+        e.dataTransfer.dropEffect = 'copy'
+        if (!over) setOver(true)
+      },
+      onDragLeave: (e: React.DragEvent<HTMLElement>) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOver(false)
+      },
+      onDrop: (e: React.DragEvent<HTMLElement>) => {
+        if (!isRoomDropDrag(e.dataTransfer.types)) return
+        e.preventDefault()
+        e.stopPropagation()
+        setOver(false)
+        showRoomDndNotice(applyDropOnRoom(roomId, e.dataTransfer))
+      }
+    }
+  }
+}
+
+function RoomDndNotice() {
+  const notice = useRoomDndNotice((s) => s.notice)
+  if (!notice) return null
+  return (
+    <div
+      role="status"
+      className={cn(
+        'pointer-events-none fixed bottom-4 left-4 z-50 max-w-72 rounded-xl px-3 py-2 text-[12px] font-medium shadow-lg',
+        notice.ok ? 'bg-ink text-canvas' : 'bg-status-error text-white'
+      )}
+    >
+      {notice.message}
+    </div>
+  )
+}
+
+function CompactRoomButton({
+  room,
+  active,
+  speaking,
+  onOpen
+}: {
+  room: CollabRoom
+  active: boolean
+  speaking: string | undefined
+  onOpen: () => void
+}) {
+  const drop = useRoomDropTarget(room.id)
+  return (
+    <button
+      type="button"
+      title={`${room.title}（可拖入 Bot）`}
+      aria-current={active}
+      onClick={onOpen}
+      {...drop.props}
+      className={cn(
+        'press-icon relative grid size-11 place-items-center rounded-2xl transition-colors',
+        active ? 'bg-active ring-1 ring-line-strong' : 'hover:bg-hover',
+        drop.over && 'bg-accent-50 ring-2 ring-accent-500'
+      )}
+    >
+      <RoomAvatarCluster
+        members={room.members.slice(0, 2)}
+        speakingName={speaking}
+        size="xs"
+        ringClassName="ring-canvas"
+      />
+      {speaking && (
+        <span
+          aria-hidden
+          className="absolute top-1 right-1 size-2 rounded-full bg-accent-600 ring-2 ring-canvas animate-pulse"
+        />
+      )}
+    </button>
+  )
+}
+
 function RoomSidebarItem({
   room,
   selected,
@@ -108,6 +194,7 @@ function RoomSidebarItem({
 }) {
   const [renaming, setRenaming] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
+  const drop = useRoomDropTarget(room.id)
   const lastMsg = room.messages.at(-1)
   const subtitle = speaker
     ? `@${speaker}…`
@@ -118,7 +205,18 @@ function RoomSidebarItem({
         : `${room.members.length} 位成员`
 
   return (
-    <div className="group/room relative">
+    <div
+      className={cn(
+        'group/room relative rounded-xl transition-shadow',
+        drop.over && 'bg-accent-50/70 ring-2 ring-accent-500'
+      )}
+      {...drop.props}
+    >
+      {drop.over && (
+        <span className="pointer-events-none absolute top-1/2 right-9 z-10 -translate-y-1/2 rounded-md bg-accent-600 px-1.5 py-0.5 text-[10.5px] font-medium text-white">
+          松开加入
+        </span>
+      )}
       {renaming ? (
         <div className="flex h-11 items-center px-2">
           <InlineEdit
@@ -236,36 +334,16 @@ export function RoomList({ compact = false }: { compact?: boolean }) {
         >
           <ArkRelayOrbSvg active={selected === NEW_ROOM_ID && !settingsOpen} className="size-4.5" />
         </button>
-        {rooms.map((r) => {
-          const active = r.id === selected && !settingsOpen
-          const speaking = speakers[r.id]
-          return (
-            <button
-              key={r.id}
-              type="button"
-              title={r.title}
-              aria-current={active}
-              onClick={() => openRoom(r.id)}
-              className={cn(
-                'press-icon relative grid size-11 place-items-center rounded-2xl transition-colors',
-                active ? 'bg-active ring-1 ring-line-strong' : 'hover:bg-hover'
-              )}
-            >
-              <RoomAvatarCluster
-                members={r.members.slice(0, 2)}
-                speakingName={speaking}
-                size="xs"
-                ringClassName="ring-canvas"
-              />
-              {speaking && (
-                <span
-                  aria-hidden
-                  className="absolute top-1 right-1 size-2 rounded-full bg-accent-600 ring-2 ring-canvas animate-pulse"
-                />
-              )}
-            </button>
-          )
-        })}
+        {rooms.map((r) => (
+          <CompactRoomButton
+            key={r.id}
+            room={r}
+            active={r.id === selected && !settingsOpen}
+            speaking={speakers[r.id]}
+            onOpen={() => openRoom(r.id)}
+          />
+        ))}
+        <RoomDndNotice />
       </section>
     )
   }
@@ -321,6 +399,7 @@ export function RoomList({ compact = false }: { compact?: boolean }) {
           ))}
         </div>
       )}
+      <RoomDndNotice />
     </section>
   )
 }
@@ -336,8 +415,10 @@ function CreateRoom() {
   const connectAccount = useBotStore((s) => s.connectAccount)
   const setAddBotOpen = useBotStore((s) => s.setAddBotOpen)
 
+  const isReadyStatus = (status?: string) =>
+    status === 'online' || status === 'attention' || status === 'busy'
   const onlineBots = useMemo(
-    () => bots.filter((b) => accounts[b.activeAccountId]?.status === 'online'),
+    () => bots.filter((b) => isReadyStatus(accounts[b.activeAccountId]?.status)),
     [bots, accounts]
   )
   const [ids, setIds] = useState<string[]>(() => onlineBots.slice(0, 3).map((b) => b.id))
@@ -353,6 +434,11 @@ function CreateRoom() {
         .map((id) => bots.find((b) => b.id === id))
         .filter((b): b is NonNullable<typeof b> => Boolean(b)),
     [ids, bots]
+  )
+  const hasDuplicateNames = useMemo(
+    () =>
+      new Set(selectedBots.map((b) => b.name.trim().toLowerCase())).size !== selectedBots.length,
+    [selectedBots]
   )
 
   const toggleBot = (botId: string) => {
@@ -444,11 +530,21 @@ function CreateRoom() {
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                 {bots.map((b) => {
                   const acc = accounts[b.activeAccountId]
-                  const isOnline = acc?.status === 'online'
+                  const isOnline = isReadyStatus(acc?.status)
                   const orderIndex = ids.indexOf(b.id)
                   const checked = orderIndex >= 0
                   const maxReached = !checked && ids.length >= 6
                   const platform = getPlatform(b.platformId)
+                  const connectAndSelect = async () => {
+                    if (!b.activeAccountId || acc?.pending) return
+                    await connectAccount(b.activeAccountId)
+                    const nextStatus = useBotStore.getState().accounts[b.activeAccountId]?.status
+                    if (isReadyStatus(nextStatus)) {
+                      setIds((prev) =>
+                        prev.includes(b.id) || prev.length >= 6 ? prev : [...prev, b.id]
+                      )
+                    }
+                  }
 
                   return (
                     <div
@@ -457,7 +553,11 @@ function CreateRoom() {
                       aria-checked={isOnline ? checked : undefined}
                       tabIndex={isOnline && !maxReached ? 0 : -1}
                       onClick={() => {
-                        if (isOnline && !maxReached) toggleBot(b.id)
+                        if (isOnline && !maxReached) {
+                          toggleBot(b.id)
+                        } else if (!isOnline && !maxReached) {
+                          void connectAndSelect()
+                        }
                       }}
                       onKeyDown={(e) => {
                         if ((e.key === ' ' || e.key === 'Enter') && isOnline && !maxReached) {
@@ -471,7 +571,9 @@ function CreateRoom() {
                           ? 'border-ink/25 bg-active/70 shadow-hairline'
                           : isOnline && !maxReached
                             ? 'cursor-pointer border-line bg-surface hover:border-line-strong hover:bg-hover/45'
-                            : 'border-line/60 bg-sunken/35 opacity-55'
+                            : !maxReached
+                              ? 'cursor-pointer border-line/60 bg-sunken/35 opacity-75 hover:opacity-95'
+                              : 'border-line/60 bg-sunken/35 opacity-55'
                       )}
                     >
                       <BotAvatar
@@ -491,7 +593,10 @@ function CreateRoom() {
                         </span>
                         <span className="mt-0.5 flex items-center gap-1 text-[11px] text-ink-muted">
                           <PlatformGlyph platform={platform} size="sm" className="size-3" />
-                          <span className="truncate">{platform.name}</span>
+                          <span className="truncate">
+                            {platform.name}
+                            {acc?.handle && acc.handle !== b.name ? ` · ${acc.handle}` : ''}
+                          </span>
                         </span>
                       </div>
 
@@ -507,19 +612,25 @@ function CreateRoom() {
                         <Button
                           size="sm"
                           variant="secondary"
+                          disabled={Boolean(acc?.pending)}
                           onClick={(e) => {
                             e.stopPropagation()
-                            if (b.activeAccountId) void connectAccount(b.activeAccountId)
+                            void connectAndSelect()
                           }}
                           className="h-6.5 px-2.5 text-[11px]"
                         >
-                          连接
+                          {acc?.pending ? '连接中…' : '连接'}
                         </Button>
                       )}
                     </div>
                   )
                 })}
               </div>
+            )}
+            {hasDuplicateNames && (
+              <p className="px-0.5 text-[11.5px] text-ink-muted">
+                同名成员将在创建时自动编号或按账号区分
+              </p>
             )}
           </div>
 
@@ -584,17 +695,11 @@ function HighlightMentions({
   members: ReadonlyArray<RoomMember>
   invert?: boolean
 }) {
-  if (!members.length) return <>{text}</>
-  const escaped = members
-    .map((m) => m.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-    .sort((a, b) => b.length - a.length)
-  const pattern = new RegExp(`(@(?:${escaped.join('|')}))(?![\\p{L}\\p{N}_])`, 'giu')
-  const parts = text.split(pattern)
+  const segments = splitMentionSegments(text, members)
   return (
     <>
-      {parts.map((part, i) =>
-        part.startsWith('@') &&
-        members.some((m) => '@' + m.name.toLowerCase() === part.toLowerCase()) ? (
+      {segments.map((seg, i) =>
+        seg.member ? (
           <span
             key={i}
             className={cn(
@@ -602,10 +707,10 @@ function HighlightMentions({
               invert ? 'bg-canvas/18 text-main' : 'bg-hover text-ink'
             )}
           >
-            {part}
+            {seg.text}
           </span>
         ) : (
-          <span key={i}>{part}</span>
+          <span key={i}>{seg.text}</span>
         )
       )}
     </>
@@ -836,15 +941,24 @@ export function RoomView({ id }: { id: string }) {
 
   if (!room) return <CreateRoom />
 
-  const mentionMatch = /(?:^|\s)@([^@\n]*)$/u.exec(text)
-  const mentionCandidates = mentionMatch
-    ? room.members.filter((m) =>
-        m.name.toLowerCase().includes(mentionMatch[1]!.trim().toLowerCase())
-      )
-    : []
+  const mentionMatch = /(?:^|.*[^A-Za-z0-9_.+-])(@([^\n]*))$/u.exec(text)
+  const atIdx = mentionMatch
+    ? mentionMatch.index + mentionMatch[0].length - mentionMatch[1]!.length
+    : -1
+  const rawQuery = mentionMatch?.[2] ?? ''
+  const closeAfterExact =
+    Boolean(mentionMatch) &&
+    /\s$/.test(rawQuery) &&
+    room.members.some((m) => m.name.toLowerCase() === rawQuery.trimEnd().toLowerCase()) &&
+    !room.members.some((m) => m.name.toLowerCase().startsWith(rawQuery.toLowerCase()))
+  const mentionCandidates =
+    mentionMatch && !closeAfterExact
+      ? room.members.filter((m) =>
+          m.name.toLowerCase().includes(rawQuery.trim().toLowerCase())
+        )
+      : []
 
   const insertMention = (memberName: string) => {
-    const atIdx = text.lastIndexOf('@')
     const next =
       mentionMatch && atIdx >= 0
         ? `${text.slice(0, atIdx)}@${memberName} `
@@ -978,9 +1092,22 @@ export function RoomView({ id }: { id: string }) {
       </PaneHeader>
 
       {error && (
-        <p role="alert" className="mx-auto mt-2 max-w-[780px] px-4 text-[12.5px] text-status-error">
-          {error}
-        </p>
+        <div className="mx-auto mt-2 flex max-w-[780px] flex-wrap items-center gap-2 px-4">
+          <p role="alert" className="text-[12.5px] text-status-error">
+            {error}
+          </p>
+          {room.mode === 'manual' &&
+            room.members.map((m) => (
+              <button
+                key={m.botId}
+                type="button"
+                onClick={() => insertMention(m.name)}
+                className="press rounded-full border border-line bg-surface px-2.5 py-0.5 text-[11.5px] font-medium text-ink-secondary hover:bg-hover hover:text-ink"
+              >
+                @{m.name}
+              </button>
+            ))}
+        </div>
       )}
 
       {/* Main Timeline or Quiet Empty Stage */}
@@ -1142,7 +1269,11 @@ export function RoomView({ id }: { id: string }) {
                   resize()
                 }}
                 onKeyDown={onKeyDown}
-                placeholder="发消息，或输入 @ 点名接力…"
+                placeholder={
+                  room.mode === 'manual'
+                    ? '当前为手动 @ 模式，输入 @ 成员名点名回复…'
+                    : '发消息，或输入 @ 点名接力…'
+                }
                 aria-label={`发消息到 ${room.title}`}
                 className="block max-h-[200px] min-h-8 flex-1 resize-none bg-transparent px-1.5 py-[5px] text-[14px] leading-[22px] text-ink outline-none placeholder:text-ink-muted"
               />

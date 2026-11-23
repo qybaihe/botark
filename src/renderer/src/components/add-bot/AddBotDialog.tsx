@@ -69,7 +69,9 @@ function AddBotFlow({ open, onClose }: { open: boolean; onClose: () => void }) {
   const locale = usePrefsStore((s) => s.locale)
 
   const liveGrokAccounts = Object.values(accounts).filter(
-    (a) => a.platformId === 'grok' && (a.status === 'online' || a.status === 'busy')
+    (a) =>
+      a.platformId === 'grok' &&
+      (a.status === 'online' || a.status === 'busy' || a.status === 'attention')
   )
 
   // If opened with `initialPlatform === 'grok'` (e.g. from onboarding or CLI `--open-grok-login`),
@@ -90,6 +92,9 @@ function AddBotFlow({ open, onClose }: { open: boolean; onClose: () => void }) {
     } else if (initialPlatform === 'antigravity') {
       autoStartedRef.current = true
       login.start('antigravity')
+    } else if (initialPlatform === 'cue') {
+      autoStartedRef.current = true
+      login.start('cue')
     }
   }, [open, initialPlatform, liveGrokAccounts.length])
 
@@ -139,6 +144,20 @@ function AddBotFlow({ open, onClose }: { open: boolean; onClose: () => void }) {
   const finish = (platformId: PlatformId, name: string, avatar: string | undefined) => {
     login.keep()
     created.current = true
+    if (platformId === 'cue') {
+      const store = useBotStore.getState()
+      const existingCueBot = store.bots.find(
+        (b) => b.platformId === 'cue' && b.accountIds.includes(login.accountId)
+      )
+      if (existingCueBot) {
+        if (name.trim()) store.renameBot(existingCueBot.id, name)
+        if (avatar) store.setBotAvatar(existingCueBot.id, avatar)
+        selectBot(existingCueBot.id)
+        onClose()
+        void store.connectAccount(login.accountId)
+        return
+      }
+    }
     const picked = localizeTemplate(template, locale)
     addBot({
       id: botId,
@@ -157,6 +176,9 @@ function AddBotFlow({ open, onClose }: { open: boolean; onClose: () => void }) {
         }
       ]
     })
+    if (platformId === 'cue') {
+      void useBotStore.getState().connectAccount(login.accountId)
+    }
   }
 
   const platform = phase.kind === 'idle' ? undefined : getPlatform(phase.platformId)
@@ -277,6 +299,7 @@ function AddBotFlow({ open, onClose }: { open: boolean; onClose: () => void }) {
                 localizeTemplate(template, locale).name || 'Hermes',
                 bots.map((b) => b.name)
               )}
+              takenNames={bots.map((b) => b.name)}
               onDone={(name, avatar) => finish('hermes', name, avatar)}
             />
           )}
@@ -321,6 +344,7 @@ function AddBotFlow({ open, onClose }: { open: boolean; onClose: () => void }) {
                 localizeTemplate(template, locale).name || getPlatform(phase.platformId).name,
                 bots.map((b) => b.name)
               )}
+              takenNames={bots.map((b) => b.name)}
               onDone={(name, avatar) => finish(phase.platformId, name, avatar)}
             />
           )}
@@ -406,21 +430,41 @@ function GrokExistingAccountStep({
     (b) => b.platformId === 'grok' && b.accountIds.includes(targetAccId)
   ).length
 
+  const baseLabels = accounts.map((a) => (a.handle || a.displayName || '').trim())
+  const labelCounts = new Map<string, number>()
+  for (const lbl of baseLabels) {
+    if (lbl) labelCounts.set(lbl.toLowerCase(), (labelCounts.get(lbl.toLowerCase()) ?? 0) + 1)
+  }
+  const formatAccountOption = (a: { id: string; displayName: string; handle: string }) => {
+    const raw = (a.handle || a.displayName || '').trim()
+    if (!raw) return a.id.slice(-6)
+    const count = labelCounts.get(raw.toLowerCase()) ?? 0
+    return count > 1 ? `${raw} (${a.id.slice(-4)})` : raw
+  }
+  const hasDuplicateHandle = [...labelCounts.values()].some((c) => c > 1)
+
   return (
     <div className="flex animate-veil-in flex-col gap-3.5 pt-1">
       <div className="rounded-xl border border-line bg-surface p-3.5">
         <div className="flex items-center justify-between gap-2">
-          <span className="text-[13px] font-medium text-ink">在已登录账号下新建 Bot</span>
+          <div className="flex items-center gap-1.5">
+            <span className="text-[13px] font-medium text-ink">在已登录账号下新建 Bot</span>
+            {hasDuplicateHandle && (
+              <span className="rounded bg-status-attention/15 px-1.5 py-0.5 text-[10.5px] font-medium text-status-attention-ink">
+                重名账号已区分
+              </span>
+            )}
+          </div>
           {accounts.length > 1 ? (
             <Select
               size="xs"
               variant="pill"
               value={targetAccId}
               onValueChange={(next) => setTargetAccId(next)}
-              className="max-w-44"
+              className="max-w-48"
               options={accounts.map((a) => ({
                 value: a.id,
-                label: a.handle || a.displayName
+                label: formatAccountOption(a)
               }))}
             />
           ) : (
@@ -567,6 +611,14 @@ function PlatformStep({
   )
 }
 
+const SYSTEM_LOGIN_URLS: Partial<Record<PlatformId, string>> = {
+  hark: 'https://app.hark.com/login',
+  dot: 'https://chatgpt.com/dots',
+  antigravity: 'https://antigravity.google.com/',
+  'meta-muse': 'https://muse.ai/',
+  cue: 'https://cue.im/login'
+}
+
 /** Shared by the add-bot and add-account flows. */
 export function LoginWaiting({
   platformId,
@@ -582,6 +634,8 @@ export function LoginWaiting({
   const platform = getPlatform(platformId)
   const actionRef = useRef<HTMLButtonElement>(null)
   const t = useT()
+  const locale = usePrefsStore((s) => s.locale)
+  const tr = (zh: string, en: string) => (locale === 'en' ? en : zh)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [rawInput, setRawInput] = useState('')
@@ -597,6 +651,26 @@ export function LoginWaiting({
     try {
       await window.electron.grok.openLogin({ accountId, openInBrowser: true })
       setBrowserOpened(true)
+    } catch (e) {
+      setErr(errorMessage(e))
+    }
+  }
+
+  const systemLoginUrl = SYSTEM_LOGIN_URLS[platformId]
+  const openPlatformInSystemBrowser = async () => {
+    if (!systemLoginUrl) return
+    setErr('')
+    const openHttps = window.electron?.muse?.openHttps
+    if (!openHttps) {
+      setErr(tr('当前环境暂不支持打开系统浏览器', 'System browser launch is unavailable here'))
+      return
+    }
+    try {
+      await openHttps(systemLoginUrl)
+      setBrowserOpened(true)
+      if (platformId === 'hark' || platformId === 'dot' || platformId === 'cue') {
+        setShowRaw(true)
+      }
     } catch (e) {
       setErr(errorMessage(e))
     }
@@ -627,11 +701,15 @@ export function LoginWaiting({
     setBusy(true)
     setErr('')
     try {
-      await window.electron.dot.importCredentials({
+      const st = await window.electron.dot.importCredentials({
         accountId,
         rawInput: rawInput.trim(),
         refreshToken: refreshInput.trim() || undefined
       })
+      if (!st?.signedIn) {
+        setErr(tr('未检测到有效 Dot 会话，请检查 Token / JSON', 'Invalid Dot credentials. Please check your Token or JSON.'))
+        return
+      }
       await window.electron.dot.cancelLogin?.(accountId).catch(() => undefined)
     } catch (e) {
       setErr(errorMessage(e))
@@ -661,6 +739,43 @@ export function LoginWaiting({
     }
   }
 
+  const quickImportCueRaw = async () => {
+    if (!accountId || !rawInput.trim() || !window.electron?.cue?.importCredentials) return
+    setBusy(true)
+    setErr('')
+    try {
+      const st = await window.electron.cue.importCredentials({
+        accountId,
+        credential: rawInput.trim()
+      })
+      if (!st.signedIn) {
+        setErr('未检测到有效 Cue 会话，请检查 Cookie（cue_session_id）/ Bearer Token')
+        return
+      }
+      await window.electron.cue.cancelLogin?.(accountId).catch(() => undefined)
+    } catch (e) {
+      setErr(errorMessage(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const waitingHeadline = browserOpened
+    ? platformId === 'grok'
+      ? tr('已在默认浏览器打开授权页，点击确认后将自动同步…', 'Authorization opened in your browser. Confirm there to sync automatically…')
+      : platformId === 'hark' || platformId === 'dot' || platformId === 'cue'
+        ? tr(
+            '已在系统浏览器打开登录页，完成后请复制 Cookie / Token 并粘贴至下方导入',
+            'Opened in your system browser. After signing in, paste your Cookie / Token below'
+          )
+        : tr(
+            '已在系统浏览器打开页面；如需完成账号安全验证或改用邮箱验证码，请在窗口内操作',
+            'Opened in your system browser. Complete verification or use Email OTP in the sign-in window'
+          )
+    : windowClosed
+      ? t('The sign-in window was closed')
+      : t('Waiting for you to sign in…')
+
   return (
     <div className="flex animate-step-in flex-col items-center gap-4 pt-3 pb-2 text-center" role="status">
       <PlatformGlyph platform={platform} size="lg" />
@@ -671,11 +786,7 @@ export function LoginWaiting({
           windowClosed && !browserOpened ? 'text-ink' : 'shimmer-text'
         )}
       >
-        {browserOpened
-          ? '已在默认浏览器打开授权页，点击确认后将自动同步…'
-          : windowClosed
-            ? t('The sign-in window was closed')
-            : t('Waiting for you to sign in…')}
+        {waitingHeadline}
       </p>
 
       <div className="flex flex-wrap justify-center gap-2">
@@ -697,7 +808,14 @@ export function LoginWaiting({
           </Button>
         )}
 
-        {(platformId === 'grok' || platformId === 'dot' || platformId === 'hark') && accountId && (
+        {systemLoginUrl && (
+          <Button variant="secondary" disabled={busy} onClick={() => void openPlatformInSystemBrowser()}>
+            <ExternalLink className="size-3.5" />
+            {tr('在系统浏览器打开', 'Open in system browser')}
+          </Button>
+        )}
+
+        {(platformId === 'grok' || platformId === 'dot' || platformId === 'hark' || platformId === 'cue') && accountId && (
           <Button variant="ghost" disabled={busy} onClick={() => setShowRaw((v) => !v)}>
             粘贴凭据导入
           </Button>
@@ -779,6 +897,27 @@ export function LoginWaiting({
         </div>
       )}
 
+      {platformId === 'cue' && showRaw && (
+        <div className="flex w-full flex-col gap-1.5 text-left">
+          <textarea
+            value={rawInput}
+            onChange={(e) => setRawInput(e.target.value)}
+            placeholder="粘贴 Cue Cookie（含 cue_session_id=...）、Bearer Token (eyJ...) 或 JSON…"
+            rows={3}
+            spellCheck={false}
+            className="w-full rounded-lg border border-line bg-surface p-2 font-mono text-[11.5px] text-ink outline-none"
+          />
+          <Button
+            size="sm"
+            variant="primary"
+            disabled={busy || !rawInput.trim()}
+            onClick={() => void quickImportCueRaw()}
+          >
+            {busy ? '正在验证会话…' : '导入凭据并继续'}
+          </Button>
+        </div>
+      )}
+
       {err && <p className="text-[12px] text-status-error">{err}</p>}
     </div>
   )
@@ -789,12 +928,14 @@ function NameStep({
   template,
   onTemplate,
   defaultName,
+  takenNames,
   onDone
 }: {
   platformId: PlatformId
   template: BotTemplate
   onTemplate: (template: BotTemplate) => void
   defaultName: string
+  takenNames: readonly string[]
   onDone: (name: string, avatar: string | undefined) => void
 }) {
   const [name, setName] = useState('')
@@ -804,6 +945,11 @@ function NameStep({
   const inputRef = useRef<HTMLInputElement>(null)
   const finalName = name.trim() || defaultName
   const t = useT()
+  const locale = usePrefsStore((s) => s.locale)
+  const tr = (zh: string, en: string) => (locale === 'en' ? en : zh)
+  const isDuplicateName = takenNames.some(
+    (existing) => existing.trim().toLowerCase() === finalName.toLowerCase()
+  )
   const emoji = template.emoji
 
   useEffect(() => inputRef.current?.focus(), [])
@@ -864,6 +1010,18 @@ function NameStep({
           aria-label={t('Bot name')}
           className="h-10 w-full rounded-lg border border-line-strong bg-surface px-3 text-center text-[14px] text-ink outline-none transition-[border-color,box-shadow] duration-100 placeholder:text-ink-muted focus:border-accent-600 focus:ring-3 focus:ring-accent-100"
         />
+        {isDuplicateName && (
+          <div className="flex items-center justify-center gap-2 text-[11.5px] text-status-attention-ink">
+            <span>{tr('该名称已存在，群聊 @提及 时可能产生歧义', 'This bot name already exists and may conflict in @mentions')}</span>
+            <button
+              type="button"
+              onClick={() => setName(freshName(finalName, takenNames))}
+              className="font-medium text-accent-600 hover:underline"
+            >
+              {tr('自动区分', 'Auto-rename')}
+            </button>
+          </div>
+        )}
         <TemplateStep selected={template.id} onPick={onTemplate} />
         {error && (
           <p className="text-center text-[12px] text-status-error" role="alert">

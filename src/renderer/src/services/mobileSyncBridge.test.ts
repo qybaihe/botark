@@ -133,4 +133,59 @@ describe('mobile snapshots', () => {
     expect(latestMedia?.kind).toBe('image')
     expect(latestMedia?.path).toMatch(/^data:image\/png;base64,/)
   })
+
+  it('does not call Muse previewWorkspaceFile for Hark or other non-Muse account media', async () => {
+    stop?.()
+    const previewWorkspaceFile = vi.fn()
+    const unsubscribe = () => undefined
+    vi.stubGlobal('window', {
+      electron: {
+        muse: { previewWorkspaceFile },
+        mobileSync: {
+          pushSnapshot: snapshots,
+          pushEvent: publishEvent,
+          onStateChanged: () => unsubscribe,
+          onSendCommand: () => unsubscribe,
+          onCommand: () => unsubscribe
+        }
+      }
+    })
+    useBotStore.setState({
+      accounts: {
+        acc_hark_1: { id: 'acc_hark_1', platformId: 'hark', status: 'online', handle: '', displayName: 'Qoder-2x' }
+      },
+      bots: [
+        {
+          id: 'bot_hark_1',
+          name: 'Qoder-2x',
+          emoji: '🤖',
+          description: '',
+          platformId: 'hark',
+          groupId: 'group',
+          accountIds: ['acc_hark_1'],
+          activeAccountId: 'acc_hark_1',
+          memory: [],
+          notes: '',
+          createdAt: 1,
+          unread: 0
+        }
+      ],
+      messages: {
+        bot_hark_1: [
+          {
+            id: 'msg_h1',
+            botId: 'bot_hark_1',
+            accountId: 'acc_hark_1',
+            role: 'bot',
+            text: 'Hark attachment',
+            createdAt: 2,
+            media: [{ kind: 'image', path: 'workspace/hark/chart.png', name: 'chart.png' }]
+          }
+        ]
+      }
+    })
+    stop = startMobileSyncBridge()
+    await vi.advanceTimersByTimeAsync(250)
+    expect(previewWorkspaceFile).not.toHaveBeenCalled()
+  })
 })

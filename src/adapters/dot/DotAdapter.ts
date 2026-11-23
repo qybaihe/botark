@@ -45,6 +45,7 @@ export class DotAdapter implements PlatformAdapter {
   private readonly listeners = new Set<AdapterListener>()
   private readonly activeDotIds = new Map<string, string>()
   private readonly activeRoomIds = new Map<string, string>()
+  private readonly activeThreadIds = new Set<string>()
   /** onAccepted of the send in flight: the first stream event proves the platform took it. */
   private readonly pendingAccept = new Map<string, () => void>()
   /** Last time the stream delivered visible content per account (widgets only arrive here). */
@@ -65,6 +66,9 @@ export class DotAdapter implements PlatformAdapter {
     // Only an explicit "posted" counts: other stream events (clock triggers,
     // late replies) can arrive before the post and would fake "delivered".
     if (event.type === 'sent') {
+      if (this.getStatus(event.accountId) === 'offline') {
+        this.setStatus(event.accountId, 'busy')
+      }
       this.pendingAccept.get(event.accountId)?.()
       return
     }
@@ -89,6 +93,8 @@ export class DotAdapter implements PlatformAdapter {
           isTyping: false
         })
         this.setStatus(event.accountId, 'online')
+      } else if (this.getStatus(event.accountId) === 'offline') {
+        this.setStatus(event.accountId, 'busy')
       }
       return
     }
@@ -96,6 +102,9 @@ export class DotAdapter implements PlatformAdapter {
     if (event.type === 'stream') {
       const convId = event.conversationId ?? event.accountId
       if (!event.done) {
+        if (this.getStatus(event.accountId) === 'offline') {
+          this.setStatus(event.accountId, 'busy')
+        }
         this.emit({
           type: 'typing',
           conversationId: convId,
@@ -137,6 +146,8 @@ export class DotAdapter implements PlatformAdapter {
             }
           })
           this.setStatus(event.accountId, 'online')
+        } else if (this.getStatus(event.accountId) === 'offline') {
+          this.setStatus(event.accountId, 'busy')
         }
         if (
           event.text ||
@@ -313,6 +324,9 @@ export class DotAdapter implements PlatformAdapter {
 
   async sendMessage(message: OutgoingMessage): Promise<SendReceipt> {
     this.bindBridgeEvents()
+    if (message.signal?.aborted) {
+      throw new AdapterError('network', 'Aborted')
+    }
     const sendStartedAt = Date.now()
     this.setStatus(message.accountId, 'busy')
     const disposeAccept = this.trackAccept(message)
@@ -331,24 +345,56 @@ export class DotAdapter implements PlatformAdapter {
       isTyping: true
     })
 
+    const rpcPromise = invokeDotRpc({
+      accountId: message.accountId,
+      op: 'sendMessage',
+      botId: message.conversationId,
+      // The main process resolves the active profile's room; the cached ids
+      // and the chat sessionId go stale after a profile switch.
+      dotId: this.activeDotIds.get(message.accountId),
+      roomId: message.sessionId || this.activeRoomIds.get(message.accountId),
+      text: message.text,
+      attachments: message.attachments
+        ?.filter((a) => Boolean(a.dataBase64))
+        .map((a) => ({
+          name: a.name,
+          mimeType: a.mimeType,
+          dataBase64: a.dataBase64!
+        }))
+    })
+
+    const raceSignal = <T>(p: Promise<T>): Promise<T> => {
+      const signal = message.signal
+      if (!signal) return p
+      if (signal.aborted) {
+        return Promise.reject(new AdapterError('network', 'Aborted'))
+      }
+      return new Promise<T>((resolve, reject) => {
+        const onAbort = () => {
+          void invokeDotRpc({
+            accountId: message.accountId,
+            op: 'cancelTurn',
+            dotId: this.activeDotIds.get(message.accountId)
+          }).catch(() => undefined)
+          reject(new AdapterError('network', 'Aborted'))
+        }
+        signal.addEventListener('abort', onAbort, { once: true })
+        p.then(
+          (val) => {
+            signal.removeEventListener('abort', onAbort)
+            resolve(val)
+          },
+          (err) => {
+            signal.removeEventListener('abort', onAbort)
+            reject(err)
+          }
+        )
+      })
+    }
+
     try {
-      const res = (await invokeDotRpc({
-        accountId: message.accountId,
-        op: 'sendMessage',
-        botId: message.conversationId,
-        // The main process resolves the active profile's room; the cached ids
-        // and the chat sessionId go stale after a profile switch.
-        dotId: this.activeDotIds.get(message.accountId),
-        roomId: message.sessionId || this.activeRoomIds.get(message.accountId),
-        text: message.text,
-        attachments: message.attachments
-          ?.filter((a) => Boolean(a.dataBase64))
-          .map((a) => ({
-            name: a.name,
-            mimeType: a.mimeType,
-            dataBase64: a.dataBase64!
-          }))
-      })) as {
+      const res = (await raceSignal(rpcPromise)) as {
+        mode?: 'dot' | 'native'
         roomId?: string
         threadId?: string
         replies?: Array<{
@@ -368,6 +414,9 @@ export class DotAdapter implements PlatformAdapter {
 
       if (res?.roomId) {
         this.activeRoomIds.set(message.accountId, res.roomId)
+      }
+      if (res?.mode === 'native' && res?.threadId) {
+        this.activeThreadIds.add(res.threadId)
       }
 
       this.emit({
@@ -438,7 +487,10 @@ export class DotAdapter implements PlatformAdapter {
       return {
         messageId: createId('msg'),
         acceptedAt: Date.now(),
-        sessionId: res?.roomId || res?.threadId || message.sessionId,
+        sessionId:
+          res?.mode === 'native'
+            ? res?.threadId || message.sessionId
+            : res?.roomId || res?.threadId || message.sessionId,
         ...(gotReply ? {} : { noReply: true })
       }
     } catch (error) {
@@ -460,6 +512,10 @@ export class DotAdapter implements PlatformAdapter {
           busy: false
         }
       })
+      if (message.signal?.aborted) {
+        this.setStatus(message.accountId, 'online')
+        throw error instanceof AdapterError ? error : new AdapterError('network', 'Aborted')
+      }
       const detail = error instanceof Error ? error.message : String(error)
       const next = statusAfterSendFailure(error)
       this.setStatus(message.accountId, next, next === 'error' ? detail : undefined)
@@ -468,6 +524,7 @@ export class DotAdapter implements PlatformAdapter {
   }
 
   subscribe(listener: AdapterListener): Unsubscribe {
+    this.bindBridgeEvents()
     this.listeners.add(listener)
     return () => this.listeners.delete(listener)
   }

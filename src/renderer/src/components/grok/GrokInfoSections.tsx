@@ -1390,9 +1390,44 @@ export function GrokMemoriesAndSkillsSection({
 }
 
 /**
- * 3b. Grok Bot MCP & Connectors (User MCP + Email Inbox + Slack / X / Teams)
- * (`GetGrokBotUserMcpSettings`, `CreateGrokBotEmailInbox`, `ListGrokBotEmailThreads`)
+ * 3b. Grok Bot MCP & Connectors (User MCP + Agent Custom MCP + Email Inbox)
+ * (`GetGrokBotUserMcpSettings`, `SetGrokBotUserMcpSettings`,
+ *  `GetGrokBotAgentCustomMcp`, `UpdateGrokBotAgentCustomMcp`,
+ *  `CreateGrokBotEmailInbox`, `ListGrokBotEmailThreads`)
  */
+function extractAgentMcpItems(raw: Record<string, unknown> | null): Array<{ name: string; detail: string }> {
+  if (!raw) return []
+  const listKeys = ['customMcps', 'custom_mcps', 'servers', 'mcpServers', 'mcp_servers'] as const
+  for (const key of listKeys) {
+    const val = raw[key]
+    if (Array.isArray(val)) {
+      return val.map((item, idx) => {
+        const obj = asObj(item) || {}
+        const name = str(obj['name'] ?? obj['serverName'] ?? obj['id'] ?? `mcp-${idx + 1}`)
+        const detail = str(obj['url'] ?? obj['command'] ?? obj['endpoint'] ?? '')
+        return { name, detail }
+      })
+    }
+    const objMap = asObj(val)
+    if (objMap) {
+      return Object.entries(objMap).map(([k, v]) => {
+        const entry = asObj(v) || {}
+        const detail = str(entry['url'] ?? entry['command'] ?? entry['endpoint'] ?? '')
+        return { name: k, detail }
+      })
+    }
+  }
+  return []
+}
+
+function detectAgentMcpPayloadKey(raw: Record<string, unknown> | null): string {
+  if (!raw) return 'mcp_servers'
+  for (const key of ['customMcps', 'custom_mcps', 'servers', 'mcpServers', 'mcp_servers'] as const) {
+    if (key in raw) return key
+  }
+  return 'mcp_servers'
+}
+
 export function GrokConnectorsAndMcpSection({
   accountId,
   agentId
@@ -1402,6 +1437,18 @@ export function GrokConnectorsAndMcpSection({
 }) {
   const status = useBotStore((s) => s.accounts[accountId]?.status)
   const [mcpSummary, setMcpSummary] = useState<string>('')
+  const [mcpUnsupported, setMcpUnsupported] = useState(false)
+  const [userMcpRaw, setUserMcpRaw] = useState<Record<string, unknown> | null>(null)
+  const [userMcpJson, setUserMcpJson] = useState('')
+  const [showUserEditor, setShowUserEditor] = useState(false)
+
+  const [agentMcpRaw, setAgentMcpRaw] = useState<Record<string, unknown> | null>(null)
+  const [agentMcpItems, setAgentMcpItems] = useState<Array<{ name: string; detail: string }>>([])
+  const [agentMcpJson, setAgentMcpJson] = useState('')
+  const [showAgentEditor, setShowAgentEditor] = useState(false)
+  const [customMcpName, setCustomMcpName] = useState('')
+  const [customMcpEndpoint, setCustomMcpEndpoint] = useState('')
+
   const [emailThreads, setEmailThreads] = useState<Array<{ id: string; subject: string }>>([])
   const [inboxUsername, setInboxUsername] = useState('')
   const [loading, setLoading] = useState(false)
@@ -1413,35 +1460,171 @@ export function GrokConnectorsAndMcpSection({
     setLoading(true)
     setError(undefined)
     try {
-      const [mcpRaw, mailRaw] = await Promise.all([
-        callGrok(accountId, 'GetGrokBotUserMcpSettings', {}).catch(() => null),
-        callGrok(accountId, 'ListGrokBotEmailThreads', { limit: 8 }).catch(() => null)
+      const [mcpRes, agentMcpRes, mailRes] = await Promise.allSettled([
+        callGrok(accountId, 'GetGrokBotUserMcpSettings', {}),
+        agentId
+          ? callGrok(accountId, 'GetGrokBotAgentCustomMcp', { agent_id: agentId })
+          : Promise.resolve(null),
+        callGrok(accountId, 'ListGrokBotEmailThreads', { limit: 8 })
       ])
-      const settings = asObj(asObj(mcpRaw)?.['settings'])
-      if (settings) {
-        const keys = Object.keys(settings)
-        setMcpSummary(keys.length ? `已同步 MCP 配置 (${keys.slice(0, 3).join(', ')})` : '已启用默认 MCP')
+
+      const errors: string[] = []
+
+      if (mcpRes.status === 'fulfilled') {
+        setMcpUnsupported(false)
+        const topObj = asObj(mcpRes.value)
+        setUserMcpRaw(topObj)
+        const settings = asObj(topObj?.['settings']) ?? topObj
+        if (settings) {
+          const keys = Object.keys(settings)
+          setMcpSummary(
+            keys.length ? `已同步 MCP 配置 (${keys.slice(0, 3).join(', ')})` : '已启用默认 MCP'
+          )
+          setUserMcpJson(JSON.stringify(settings, null, 2))
+        } else {
+          setMcpSummary('已连接云端 MCP 设置')
+          setUserMcpJson('{}')
+        }
+      } else {
+        setUserMcpRaw(null)
+        const cleaned = cleanSidebarError(mcpRes.reason)
+        if (cleaned) {
+          errors.push(`MCP 设置加载失败：${cleaned}`)
+          setMcpUnsupported(false)
+        } else {
+          setMcpUnsupported(true)
+        }
       }
-      const threads = Array.isArray(asObj(mailRaw)?.['threads'])
-        ? (asObj(mailRaw)!['threads'] as unknown[])
-        : []
-      setEmailThreads(
-        threads.map((th, i) => {
-          const r = asObj(th) || {}
-          return {
-            id: str(r['threadId'] ?? r['thread_id'] ?? i),
-            subject: str(r['subject'] ?? r['snippet'] ?? 'Email Thread')
-          }
-        })
-      )
+
+      if (agentId) {
+        if (agentMcpRes.status === 'fulfilled') {
+          const rawObj = asObj(agentMcpRes.value)
+          setAgentMcpRaw(rawObj)
+          setAgentMcpItems(extractAgentMcpItems(rawObj))
+          setAgentMcpJson(JSON.stringify(rawObj ?? {}, null, 2))
+        } else {
+          setAgentMcpRaw(null)
+          setAgentMcpItems([])
+          const cleaned = cleanSidebarError(agentMcpRes.reason)
+          if (cleaned) errors.push(`Agent 自定义 MCP 加载失败：${cleaned}`)
+        }
+      } else {
+        setAgentMcpRaw(null)
+        setAgentMcpItems([])
+      }
+
+      if (mailRes.status === 'fulfilled') {
+        const threads = Array.isArray(asObj(mailRes.value)?.['threads'])
+          ? (asObj(mailRes.value)!['threads'] as unknown[])
+          : []
+        setEmailThreads(
+          threads.map((th, i) => {
+            const r = asObj(th) || {}
+            return {
+              id: str(r['threadId'] ?? r['thread_id'] ?? i),
+              subject: str(r['subject'] ?? r['snippet'] ?? 'Email Thread')
+            }
+          })
+        )
+      } else {
+        const cleaned = cleanSidebarError(mailRes.reason)
+        if (cleaned) errors.push(`专属邮箱加载失败：${cleaned}`)
+      }
+
+      if (errors.length > 0) {
+        setError(errors.join('；'))
+      }
     } finally {
       setLoading(false)
     }
-  }, [accountId])
+  }, [accountId, agentId])
 
   useEffect(() => {
     if (status === 'online' || status === 'busy') void refresh()
   }, [refresh, status, agentId])
+
+  const saveUserMcpSettings = async () => {
+    setBusy(true)
+    setError(undefined)
+    setHint(undefined)
+    try {
+      const parsed = JSON.parse(userMcpJson || '{}') as unknown
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('用户 MCP 设置必须是 JSON 对象')
+      }
+      const payload =
+        userMcpRaw && 'settings' in userMcpRaw && !('settings' in (parsed as Record<string, unknown>))
+          ? { settings: parsed }
+          : (parsed as Record<string, unknown>)
+      await callGrok(accountId, 'SetGrokBotUserMcpSettings', payload)
+      setHint('已保存 Grok 用户 MCP 设置')
+      setShowUserEditor(false)
+      await refresh()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const addQuickAgentCustomMcp = async () => {
+    if (!agentId) return
+    const name = customMcpName.trim()
+    const endpoint = customMcpEndpoint.trim()
+    if (!name || !endpoint) return
+    setBusy(true)
+    setError(undefined)
+    setHint(undefined)
+    try {
+      const key = detectAgentMcpPayloadKey(agentMcpRaw)
+      const currentVal = agentMcpRaw?.[key]
+      const entry = /^https?:\/\//i.test(endpoint) ? { url: endpoint } : { command: endpoint }
+      let nextContainer: unknown
+      if (Array.isArray(currentVal)) {
+        nextContainer = [...currentVal, { name, ...entry }]
+      } else {
+        const map = asObj(currentVal) ? { ...asObj(currentVal)! } : {}
+        map[name] = entry
+        nextContainer = map
+      }
+      await callGrok(accountId, 'UpdateGrokBotAgentCustomMcp', {
+        agent_id: agentId,
+        [key]: nextContainer
+      })
+      setCustomMcpName('')
+      setCustomMcpEndpoint('')
+      setHint(`已更新 Agent 自定义 MCP「${name}」`)
+      await refresh()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const saveAgentCustomMcpJson = async () => {
+    if (!agentId) return
+    setBusy(true)
+    setError(undefined)
+    setHint(undefined)
+    try {
+      const parsed = JSON.parse(agentMcpJson || '{}') as unknown
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('Agent 自定义 MCP 配置必须是 JSON 对象')
+      }
+      await callGrok(accountId, 'UpdateGrokBotAgentCustomMcp', {
+        agent_id: agentId,
+        ...(parsed as Record<string, unknown>)
+      })
+      setHint('已保存 Agent 自定义 MCP 配置')
+      setShowAgentEditor(false)
+      await refresh()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const createInbox = async () => {
     if (!inboxUsername.trim()) return
@@ -1467,13 +1650,122 @@ export function GrokConnectorsAndMcpSection({
   return (
     <Section
       title="连接器 · MCP · 专属邮箱"
-      count={emailThreads.length || undefined}
+      count={agentMcpItems.length + emailThreads.length || undefined}
       action={<RefreshButton loading={loading} onClick={() => void refresh()} />}
     >
       <div className="flex flex-col gap-2 text-[12px]">
-        {error && <p className="text-status-error">{error}</p>}
-        {hint && <p className="text-ink-secondary">{hint}</p>}
-        {mcpSummary && <p className="rounded-md bg-hover/50 px-2 py-1 text-[11.5px] text-ink">{mcpSummary}</p>}
+        {error && (
+          <p role="alert" className="rounded-md bg-status-error/10 px-2 py-1 text-[11.5px] text-status-error">
+            {error}
+          </p>
+        )}
+        {hint && <p className="text-[11.5px] text-status-online-ink">{hint}</p>}
+
+        {/* User Cloud MCP Settings */}
+        {mcpUnsupported ? (
+          <p className="rounded-md bg-hover/40 px-2 py-1 text-[11.5px] text-ink-muted">
+            该账号暂不支持云端 MCP 接口或未启用
+          </p>
+        ) : (
+          <div className="flex flex-col gap-1.5 rounded-md border border-line/70 bg-hover/30 p-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="truncate text-[11.5px] text-ink">
+                {mcpSummary || '云端用户 MCP 设置'}
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowUserEditor((v) => !v)}
+                className="shrink-0 text-[11px] font-medium text-accent-600 hover:underline"
+              >
+                {showUserEditor ? '收起' : '编辑设置'}
+              </button>
+            </div>
+            {showUserEditor && (
+              <div className="flex flex-col gap-1.5">
+                <textarea
+                  rows={4}
+                  value={userMcpJson}
+                  onChange={(e) => setUserMcpJson(e.target.value)}
+                  className="w-full rounded-md border border-line bg-main px-2 py-1.5 font-mono text-[11px] text-ink outline-none focus:border-accent-300"
+                />
+                <div className="flex justify-end">
+                  <Button size="sm" variant="primary" disabled={busy} onClick={() => void saveUserMcpSettings()}>
+                    保存用户 MCP 设置
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Per-Agent Custom MCP */}
+        {agentId && (
+          <div className="flex flex-col gap-1.5 rounded-md border border-line/70 bg-hover/30 p-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11.5px] font-medium text-ink">
+                Agent 自定义 MCP ({agentMcpItems.length})
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowAgentEditor((v) => !v)}
+                className="shrink-0 text-[11px] font-medium text-accent-600 hover:underline"
+              >
+                {showAgentEditor ? '收起 JSON' : '编辑 JSON'}
+              </button>
+            </div>
+
+            {agentMcpItems.length > 0 && (
+              <ul className="flex flex-col gap-1">
+                {agentMcpItems.map((item) => (
+                  <li key={item.name} className="flex items-center justify-between gap-2 text-[11px]">
+                    <span className="font-medium text-ink">{item.name}</span>
+                    {item.detail && <span className="truncate font-mono text-ink-muted">{item.detail}</span>}
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <div className="flex gap-1">
+              <TextInput
+                value={customMcpName}
+                onChange={(e) => setCustomMcpName(e.target.value)}
+                placeholder="名称"
+                className="h-7 w-24 text-[11.5px]"
+              />
+              <TextInput
+                value={customMcpEndpoint}
+                onChange={(e) => setCustomMcpEndpoint(e.target.value)}
+                placeholder="https://... 或启动命令"
+                className="h-7 flex-1 font-mono text-[11.5px]"
+              />
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={busy || !customMcpName.trim() || !customMcpEndpoint.trim()}
+                onClick={() => void addQuickAgentCustomMcp()}
+              >
+                添加
+              </Button>
+            </div>
+
+            {showAgentEditor && (
+              <div className="flex flex-col gap-1.5">
+                <textarea
+                  rows={4}
+                  value={agentMcpJson}
+                  onChange={(e) => setAgentMcpJson(e.target.value)}
+                  className="w-full rounded-md border border-line bg-main px-2 py-1.5 font-mono text-[11px] text-ink outline-none focus:border-accent-300"
+                />
+                <div className="flex justify-end">
+                  <Button size="sm" variant="primary" disabled={busy} onClick={() => void saveAgentCustomMcpJson()}>
+                    保存 Agent MCP
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="flex gap-1.5">
           <TextInput
             value={inboxUsername}

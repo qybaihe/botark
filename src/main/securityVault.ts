@@ -50,7 +50,7 @@ const AUDITED_STORES: ReadonlyArray<{ id: string; label: string; fileName: strin
 ]
 
 const PLATFORM_SECURITY_SPECS: Record<
-  'meta-muse' | 'grok' | 'hark' | 'dot' | 'hermes' | 'antigravity',
+  'meta-muse' | 'grok' | 'hark' | 'dot' | 'hermes' | 'antigravity' | 'cue',
   { transportProtocol: string; credentialIsolation: string }
 > = {
   'meta-muse': {
@@ -76,6 +76,10 @@ const PLATFORM_SECURITY_SPECS: Record<
   antigravity: {
     transportProtocol: 'Google gRPC-Web (JSPB) + StreamAgentStateUpdates（TLS 1.3）',
     credentialIsolation: '独立 persist 分区 Google 会话 + 主进程 SAPISIDHASH 签名（渲染层零 Cookie 接触）'
+  },
+  cue: {
+    transportProtocol: 'Manus Connect-RPC + REST v2（TLS 1.3 · 主进程代理转发）',
+    credentialIsolation: '独立 persist 分区 + 系统钥匙串 SafeStorage 密文存储（渲染层零密钥暴露）'
   }
 }
 

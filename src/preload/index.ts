@@ -4,6 +4,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type { BotHubBridge } from '@shared/bridge'
 import {
   ANTIGRAVITY_CHANNELS,
+  CUE_CHANNELS,
   DOT_CHANNELS,
   GROK_CHANNELS,
   HARK_CHANNELS,
@@ -13,6 +14,7 @@ import {
   VAULT_CHANNELS,
   WEB_VIEW_CHANNELS,
   type AntigravityMainEvent,
+  type CueMainEvent,
   type DotMainEvent,
   type GrokMainEvent,
   type HarkMainEvent,
@@ -176,6 +178,20 @@ const bridge: BotHubBridge = {
       const handler = (_event: unknown, payload: AntigravityMainEvent) => listener(payload)
       ipcRenderer.on(ANTIGRAVITY_CHANNELS.event, handler)
       return () => ipcRenderer.removeListener(ANTIGRAVITY_CHANNELS.event, handler)
+    }
+  },
+  cue: {
+    openLogin: (request) => ipcRenderer.invoke(CUE_CHANNELS.openLogin, request),
+    cancelLogin: (accountId) => ipcRenderer.invoke(CUE_CHANNELS.cancelLogin, accountId),
+    importCredentials: (request) => ipcRenderer.invoke(CUE_CHANNELS.importCredentials, request),
+    clearAuth: (accountId) => ipcRenderer.invoke(CUE_CHANNELS.clearAuth, accountId),
+    authStatus: (accountId) => ipcRenderer.invoke(CUE_CHANNELS.authStatus, accountId),
+    getSession: (accountId) => ipcRenderer.invoke(CUE_CHANNELS.getSession, accountId),
+    rpc: (request) => ipcRenderer.invoke(CUE_CHANNELS.rpc, request),
+    onEvent: (listener) => {
+      const handler = (_event: unknown, payload: CueMainEvent) => listener(payload)
+      ipcRenderer.on(CUE_CHANNELS.event, handler)
+      return () => ipcRenderer.removeListener(CUE_CHANNELS.event, handler)
     }
   },
   slack: {

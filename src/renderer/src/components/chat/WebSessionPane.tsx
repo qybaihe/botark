@@ -1,4 +1,4 @@
-import { useRef } from 'react'
+import { useEffect, useRef } from 'react'
 import { getPlatform } from '@adapters/platforms'
 import { AlertCircle, ArrowLeft, ExternalLink, Globe, RotateCw } from 'lucide-react'
 import { ArkShieldVaultSvg } from '@/components/ui/ArkGlyphs'
@@ -35,9 +35,29 @@ export function WebSessionPane({ bot, account }: WebSessionPaneProps) {
     label: `${platform.name} · ${account.displayName}`,
     containerRef
   })
+  const connectAccount = useBotStore((s) => s.connectAccount)
+
+  // While the user interacts or logs in inside WebSessionPane, periodically probe account status
+  // when offline/error so the header capsule & sidebar status dot immediately update to online.
+  useEffect(() => {
+    if (state.status !== 'ready') return
+    if (account.status !== 'offline' && account.status !== 'error') return
+    void connectAccount(account.id)
+    const timer = setInterval(() => {
+      const latest = useBotStore.getState().accounts[account.id]
+      if (!latest || (latest.status !== 'offline' && latest.status !== 'error')) {
+        clearInterval(timer)
+        return
+      }
+      if (!latest.pending) {
+        void useBotStore.getState().connectAccount(account.id)
+      }
+    }, 3500)
+    return () => clearInterval(timer)
+  }, [state.status, account.id, account.status, connectAccount])
 
   const reloadView = () => {
-    void getBridge()?.webViews?.navigate?.(viewId)
+    void getBridge()?.webViews?.navigate?.(viewId).then(() => connectAccount(account.id)).catch(() => undefined)
   }
 
   const openPopupWindow = () => {

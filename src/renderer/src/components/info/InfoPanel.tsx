@@ -46,6 +46,18 @@ import {
   AntigravityConversationsSection,
   AntigravityEnvironmentsSection
 } from '@/components/antigravity/AntigravityInfoSections'
+import {
+  CueAccountAuthSection,
+  CueAgentContactsSection,
+  CueAgentsSection,
+  CueAutomationsSection,
+  CueComputerSection,
+  CueConnectorsSection,
+  CueFilesSection,
+  CueOverviewSection,
+  CueSessionsSection,
+  CueSkillsSection
+} from '@/components/cue/CueInfoSections'
 import { MemorySection } from '@/components/muse/MemorySection'
 import { PermissionsSection } from '@/components/muse/PermissionsSection'
 import { SkillsSection } from '@/components/muse/SkillsSection'
@@ -362,6 +374,15 @@ export function InfoPanel() {
                     />
                   </>
                 )}
+                {bot.platformId === 'cue' && bot.activeAccountId && (
+                  <>
+                    <CueAccountAuthSection accountId={bot.activeAccountId} />
+                    <CueOverviewSection bot={bot} account={accountMap[bot.activeAccountId]} />
+                    <CueSessionsSection accountId={bot.activeAccountId} bot={bot} />
+                    <CueAutomationsSection accountId={bot.activeAccountId} />
+                    <CueSkillsSection accountId={bot.activeAccountId} />
+                  </>
+                )}
 
                 <Section title={t('Accounts')} flush>
                   <AccountList bot={bot} accounts={accounts} />
@@ -405,6 +426,11 @@ export function InfoPanel() {
                   accountId={bot.activeAccountId}
                   agentId={bot.selectedAgentId}
                 />
+              ) : bot.platformId === 'cue' ? (
+                <CueFilesSection
+                  accountId={bot.activeAccountId}
+                  sessionId={bot.activeSessionId}
+                />
               ) : bot.platformId === 'hark' ? (
                 <HarkLibrarySection botId={bot.id} key={bot.activeAccountId + (bot.activeSessionId ?? '')} accountId={bot.activeAccountId} />
               ) : (
@@ -430,6 +456,15 @@ export function InfoPanel() {
                     agentId={bot.selectedAgentId}
                   />
                 </>
+              ) : bot.platformId === 'cue' ? (
+                <>
+                  <CueComputerSection
+                    accountId={bot.activeAccountId}
+                    agentId={bot.selectedAgentId}
+                    sessionId={bot.activeSessionId}
+                  />
+                  <CueConnectorsSection accountId={bot.activeAccountId} />
+                </>
               ) : bot.platformId === 'hermes' ? (
                 <>
                   <HermesSkillsSection accountId={bot.activeAccountId} />
@@ -441,7 +476,7 @@ export function InfoPanel() {
                 <HarkComputerSection key={bot.activeAccountId + (bot.activeSessionId ?? '')} accountId={bot.activeAccountId} botId={bot.id} />
               )
             ) : (
-              /* activeTab === 'members' — Muse Sharing / Grok Agents & Rooms / Hark Devices / Antigravity Agents */
+              /* activeTab === 'members' — Muse Sharing / Grok & Cue Agents / Hark Devices / Antigravity Agents */
               <>
                 {bot.platformId === 'meta-muse' ? (
                   <>
@@ -461,6 +496,19 @@ export function InfoPanel() {
                     <GrokMembersSection
                       accountId={bot.activeAccountId}
                       agentId={bot.selectedAgentId}
+                    />
+                  </>
+                ) : bot.platformId === 'cue' ? (
+                  <>
+                    <CueAgentsSection
+                      accountId={bot.activeAccountId}
+                      agentId={bot.selectedAgentId}
+                      botId={bot.id}
+                    />
+                    <CueAgentContactsSection
+                      accountId={bot.activeAccountId}
+                      agentId={bot.selectedAgentId}
+                      sessionId={bot.activeSessionId}
                     />
                   </>
                 ) : bot.platformId === 'antigravity' ? (

@@ -156,10 +156,10 @@ function isHarkMedia(accountId: string | undefined, path: string): boolean {
 function isMuseMedia(accountId: string | undefined, path: string): boolean {
   const trimmed = path.trim()
   if (!trimmed || /^data:/i.test(trimmed)) return false
-  if (/^\/?(?:fs\/raw\/)?workspace\//i.test(trimmed)) return true
-  if (/^https?:\/\/(?:[^/]*\.)?muse\.ai\//i.test(trimmed)) return true
-  if (accountId && useBotStore.getState().accounts[accountId]?.platformId === 'meta-muse') return true
-  return false
+  const owner = accountId ? useBotStore.getState().accounts[accountId]?.platformId : undefined
+  if (owner) return owner === 'meta-muse'
+  return /^\/?(?:fs\/raw\/)?workspace\//i.test(trimmed) ||
+    /^https?:\/\/(?:[^/]*\.)?muse\.ai\//i.test(trimmed)
 }
 
 function isDotMedia(accountId: string | undefined, path: string): boolean {

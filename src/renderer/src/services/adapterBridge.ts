@@ -1,6 +1,6 @@
 import { belongsToSelectedSession } from './sessionEvents'
 import { adapterRegistry } from "@adapters/registry"
-import type { AdapterEvent } from "@adapters/types"
+import type { AdapterEvent, PlatformId } from "@adapters/types"
 import { useBotStore } from "@/store/botStore"
 import { ReplyWatchdog } from "@/store/replyWatchdog"
 
@@ -50,9 +50,12 @@ function electronBridge(): Window["electron"] | undefined {
   return typeof window !== "undefined" ? window.electron : undefined
 }
 
-function handleEvent(event: AdapterEvent): void {
-    if (!belongsToSelectedSession(event, useBotStore.getState().bots)) return
+function handleEvent(platformId: PlatformId, event: AdapterEvent): void {
   const store = useBotStore.getState()
+  const accountId = event.type === "message" ? event.message.accountId : event.accountId
+  const account = store.accounts[accountId]
+  if (account && account.platformId !== platformId) return
+  if (!belongsToSelectedSession(event, store.bots)) return
   if (event.type === "message") watchdog.touch(botIdFor(event.message.conversationId))
   else if (event.type === "typing" || event.type === "message_delta") watchdog.touch(botIdFor(event.conversationId))
   else if (event.type === "activity") touchAccount(event.accountId)
@@ -114,7 +117,9 @@ function handleEvent(event: AdapterEvent): void {
  * Returns a cleanup function that unsubscribes all listeners.
  */
 export function startAdapterBridge(): () => void {
-  const unsubscribers = adapterRegistry.list().map((adapter) => adapter.subscribe(handleEvent))
+  const unsubscribers = adapterRegistry.list().map((adapter) =>
+    adapter.subscribe((event) => handleEvent(adapter.id, event))
+  )
 
   const bridge = electronBridge()
   if (bridge?.grok?.onEvent) {
@@ -279,6 +284,32 @@ export function startAdapterBridge(): () => void {
           if (displayName && /^(?:Meta Muse|Muse)(?:\s+\d+)?$/i.test(bot.name.trim())) {
             store.renameBot(bot.id, `Muse · ${displayName}`)
           }
+        }
+      })
+    )
+  }
+
+  const cueBridge = electronBridge()?.cue
+  if (cueBridge?.onEvent) {
+    unsubscribers.push(
+      cueBridge.onEvent((event) => {
+        const store = useBotStore.getState()
+        if (!store.accounts[event.accountId]) {
+          // Account is not materialized in botStore yet (e.g. AddBotDialog is still on NameStep);
+          // avoid creating a duplicate bot prematurely before the user finishes naming.
+          return
+        }
+        if (event.type === "auth") {
+          if (event.signedIn) {
+            store.setAccountStatus(event.accountId, "online")
+            void store.syncCueAccountBots(event.accountId)
+          } else if (!event.windowClosed) {
+            store.setAccountStatus(event.accountId, "offline", "未登录 Cue")
+          }
+          return
+        }
+        if (event.type === "roster_changed") {
+          void store.syncCueAccountBots(event.accountId)
         }
       })
     )

@@ -95,6 +95,19 @@ export const PLATFORM_INSPECTORS: Record<PlatformId, PlatformInspectorSpec> = {
       { id: 'computer', label: 'Environments' },
       { id: 'members', label: 'Agents' }
     ]
+  },
+  cue: {
+    platformId: 'cue',
+    displayName: 'Cue',
+    protocolLabel: 'Connect-RPC + WS · Cue Native',
+    supportsWebSession: false,
+    supportsQuickNewConversation: false,
+    tabs: [
+      { id: 'overview', label: 'Overview' },
+      { id: 'library', label: 'Library' },
+      { id: 'computer', label: 'Computer' },
+      { id: 'members', label: 'Agents' }
+    ]
   }
 }
 

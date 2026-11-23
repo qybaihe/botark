@@ -6,6 +6,7 @@ import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger } from '@/compo
 import { cn } from '@/lib/cn'
 import { getBotStatus, lastMessage } from '@/lib/selectors'
 import { useBotStore } from '@/store/botStore'
+import { applyDropOutOfRoom, BOT_DRAG_MIME, isRoomMemberDrag, showRoomDndNotice } from '@/rooms/roomDnd'
 import type { BotGroup } from '@/types'
 import { BotListItem } from './BotListItem'
 import { ConfigureSectionsDialog } from './ConfigureSectionsDialog'
@@ -132,6 +133,7 @@ export function BotList() {
   const reorderBot = useBotStore((s) => s.reorderBot)
   const [dragId, setDragId] = useState<string | null>(null)
   const [dropAt, setDropAt] = useState<string | null>(null)
+  const [memberOver, setMemberOver] = useState(false)
   const pinnedBots = bots.filter((b) => b.pinned)
   const [configureOpen, setConfigureOpen] = useState(false)
 
@@ -190,7 +192,32 @@ export function BotList() {
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div
+      className={cn(
+        'relative flex h-full min-h-0 flex-col rounded-xl transition-colors',
+        memberOver && 'bg-status-error/[0.06] ring-1 ring-status-error/40'
+      )}
+      onDragOver={(e) => {
+        if (!isRoomMemberDrag(e.dataTransfer.types)) return
+        e.preventDefault()
+        e.dataTransfer.dropEffect = 'move'
+        if (!memberOver) setMemberOver(true)
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setMemberOver(false)
+      }}
+      onDrop={(e) => {
+        if (!isRoomMemberDrag(e.dataTransfer.types)) return
+        e.preventDefault()
+        setMemberOver(false)
+        showRoomDndNotice(applyDropOutOfRoom(e.dataTransfer))
+      }}
+    >
+      {memberOver && (
+        <div className="pointer-events-none absolute inset-x-2 top-1 z-10 rounded-lg bg-status-error/90 px-2 py-1 text-center text-[11.5px] font-medium text-white shadow">
+          松开即可将该 Bot 移出群聊
+        </div>
+      )}
       <div className="min-h-0 flex-1 overflow-y-auto" onKeyDown={moveBetweenRows}>
         <div className="flex flex-col gap-2.5 px-0 pt-0.5">
           {/* Grok Bot Pinned Tiles Grid (`sand-pinned-grid`) */}
@@ -207,17 +234,26 @@ export function BotList() {
                 )}
               >
                 {pinnedBots.map((bot) => (
-                  <BotListItem
+                  <div
                     key={bot.id}
-                    bot={bot}
-                    layout="pinned"
-                    status={getBotStatus(bot, accounts)}
-                    last={lastMessage(messages[bot.id])}
-                    typing={typing[bot.id] === true}
-                    activity={activity[bot.activeAccountId]}
-                    selected={bot.id === selectedBotId}
-                    onSelect={selectBot}
-                  />
+                    draggable
+                    onDragStart={(e) => {
+                      e.dataTransfer.effectAllowed = 'copy'
+                      e.dataTransfer.setData('text/plain', bot.id)
+                      e.dataTransfer.setData(BOT_DRAG_MIME, bot.id)
+                    }}
+                  >
+                    <BotListItem
+                      bot={bot}
+                      layout="pinned"
+                      status={getBotStatus(bot, accounts)}
+                      last={lastMessage(messages[bot.id])}
+                      typing={typing[bot.id] === true}
+                      activity={activity[bot.activeAccountId]}
+                      selected={bot.id === selectedBotId}
+                      onSelect={selectBot}
+                    />
+                  </div>
                 ))}
               </div>
             </section>
@@ -253,8 +289,9 @@ export function BotList() {
                         draggable
                         onDragStart={(e) => {
                           setDragId(bot.id)
-                          e.dataTransfer.effectAllowed = 'move'
+                          e.dataTransfer.effectAllowed = 'copyMove'
                           e.dataTransfer.setData('text/plain', bot.id)
+                          e.dataTransfer.setData(BOT_DRAG_MIME, bot.id)
                         }}
                         onDragEnd={() => {
                           setDragId(null)

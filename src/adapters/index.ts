@@ -5,6 +5,7 @@ import { createHarkAdapter } from "./hark/HarkAdapter"
 import { createDotAdapter } from "./dot/DotAdapter"
 import { createHermesAdapter } from "./hermes/HermesAdapter"
 import { createAntigravityAdapter } from "./antigravity/AntigravityAdapter"
+import { createCueAdapter } from "./cue/CueAdapter"
 import { adapterRegistry, type AdapterRegistry } from "./registry"
 
 export { adapterRegistry, AdapterRegistry } from "./registry"
@@ -38,4 +39,5 @@ export function registerBuiltInAdapters(registry: AdapterRegistry = adapterRegis
   if (!registry.has("dot")) registry.register(createDotAdapter())
   if (!registry.has("hermes")) registry.register(createHermesAdapter())
   if (!registry.has("antigravity")) registry.register(createAntigravityAdapter())
+  if (!registry.has("cue")) registry.register(createCueAdapter())
 }
