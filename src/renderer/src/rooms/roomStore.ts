@@ -512,7 +512,7 @@ async function memberReply(room: CollabRoom, member: RoomMember, signal: AbortSi
     if (workspace?.tools.length) {
       prompt +=
         '\n\nTo request one workspace tool, reply with [TOOL] followed by JSON {"name":"…","args":{…}}. A person approves each call. Available tools: ' +
-        JSON.stringify(workspace.tools.map((t) => ({ name: t.name, schema: t.inputSchema })))
+        JSON.stringify(workspace.tools.map((t) => ({ name: t.name, description: t.description, schema: t.inputSchema })))
     }
     signal.throwIfAborted()
     signal.addEventListener('abort', cancel, { once: true })

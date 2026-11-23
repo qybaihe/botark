@@ -1,3 +1,4 @@
+import { dsBotServer } from '@shared/dsBotMcp'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   CheckCircle2,
@@ -144,6 +145,10 @@ export function McpSettingsSection({
   const [keepSecrets, setKeepSecrets] = useState(true)
   const [formError, setFormError] = useState<string>()
 
+  const [dsBotOpen, setDsBotOpen] = useState(false)
+  const [dsBotToken, setDsBotToken] = useState('')
+  const [dsBotPort, setDsBotPort] = useState('8797')
+
   // JSON Paste Dialog state
   const [pasteOpen, setPasteOpen] = useState(false)
   const [rawJson, setRawJson] = useState('')
@@ -192,6 +197,27 @@ export function McpSettingsSection({
       if (refreshed) setView(refreshed)
     } finally {
       setBusy(false)
+    }
+  }
+
+  const scopeType = scope === '__global__' ? 'global' : 'scope'
+  const existingDsBot = view?.servers.find((s) => s.name === 'ds-bot' && s.scope === scopeType)
+
+  async function connectDsBot() {
+    try {
+      const server = dsBotServer(Number(dsBotPort), dsBotToken, scopeType)
+      setFormError(undefined)
+      await runManage({ op: 'upsert', server, autoStart: true }, (next) => {
+        const connected = next.servers.find((s) => s.name === server.name && s.scope === scopeType)
+        if (!connected?.running) {
+          setFormError(connected?.lastError || L('DS Bot 连接失败', 'Could not connect to DS Bot'))
+          return
+        }
+        setDsBotToken('')
+        setDsBotOpen(false)
+      })
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : String(err))
     }
   }
 
@@ -394,6 +420,13 @@ export function McpSettingsSection({
             <ClipboardPaste className="size-3.5" />
             {L('粘贴 JSON', 'Paste JSON')}
           </Button>
+          <Button size="sm" variant="secondary" disabled={busy || loading || !view} onClick={() => {
+            if (existingDsBot) return openEdit(existingDsBot)
+            setDsBotPort('8797')
+            setFormError(undefined)
+            setError(undefined)
+            setDsBotOpen(true)
+          }}>DS Bot</Button>
           <Button size="sm" variant="primary" disabled={busy} onClick={openCreate}>
             <Plus className="size-3.5" />
             {L('添加服务', 'Add Server')}
@@ -724,6 +757,28 @@ export function McpSettingsSection({
         )}
       </div>
 
+      <Dialog open={dsBotOpen} onOpenChange={(next) => {
+        if (busy) return
+        setDsBotOpen(next)
+        if (!next) setDsBotToken('')
+      }} title={L('连接 DS Bot 团队', 'Connect a DS Bot team')}
+        footer={<Button variant="primary" disabled={busy || !dsBotToken.trim()} onClick={() => void connectDsBot()}>
+          {L('保存并连接', 'Save and connect')}
+        </Button>}>
+        <div className="flex flex-col gap-3">
+          <p className="text-[13px] text-ink-secondary">{L(
+            '在 DS Bot 的「设置 → MCP 访问」启用本机服务，为 BotArk 创建客户端并选择可访问的 Bot 和群聊。',
+            'Enable MCP access in DS Bot settings. Create a BotArk client and select the bots and groups it can reach.'
+          )}</p>
+          <Field htmlFor="ds-bot-port" label={L('本机端口', 'Local port')}>
+            <TextInput id="ds-bot-port" type="number" min={1024} max={65535} value={dsBotPort} onChange={(e) => setDsBotPort(e.target.value)} />
+          </Field>
+          <Field htmlFor="ds-bot-token" label={L('客户端令牌', 'Client token')}>
+            <TextInput id="ds-bot-token" type="password" autoComplete="off" value={dsBotToken} onChange={(e) => setDsBotToken(e.target.value)} />
+          </Field>
+          {(formError || error) && <p role="alert" className="text-[12px] text-status-error">{formError || error}</p>}
+        </div>
+      </Dialog>
       {/* Add / Edit Server Dialog */}
       <Dialog
         open={formOpen}

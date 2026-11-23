@@ -149,6 +149,13 @@ Put your sharpest agents in the same room — let **Grok** review architecture, 
 
 ---
 
+### Connect a DS Bot team
+
+In DS Bot settings, enable **MCP access**, create a BotArk client and select the bots and groups it may reach. In BotArk’s MCP settings, choose a room or the global scope, click **DS Bot**, and enter the local port (default 8797) and client token.
+
+In a native room, open **Workspace → MCP**. List authorized bots with `ds-bot__list_bots`, send a task with `ds-bot__send_to_bot`, then pass the returned `after` timestamp to `ds-bot__wait_for_reply`. The same tools are available to room members through the usual approval flow. DS Bot handles its own approval prompts. If several clients share the same DS Bot chat, the wait tool returns replies after the supplied timestamp.
+
+
 ## 🤖 6 Native Platforms at a Glance
 
 Rather than wrapping web pages in generic tabs, BotArk speaks each platform's native protocol and adapts the right-side workbench (`⌘I`) accordingly:
