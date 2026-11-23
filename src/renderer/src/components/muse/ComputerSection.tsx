@@ -1,3 +1,4 @@
+import { parseComputerContext } from './computerContext'
 import { useCallback, useEffect, useState } from 'react'
 import { Monitor, Play, RefreshCw, Square } from 'lucide-react'
 import { Section } from '@/components/info/Section'
@@ -9,44 +10,12 @@ import { cleanSidebarError } from '@/lib/sidebarCompat'
 import { useBotStore } from '@/store/botStore'
 import { t } from '@/lib/i18n'
 
-type ComputerContextSnap = {
-  taskId?: string
-  sha256?: string
-  status?: string
-  url?: string
-  title?: string
-  raw: Record<string, unknown>
-}
-
 function asObj(v: unknown): Record<string, unknown> | null {
   return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null
 }
 
 function str(v: unknown): string {
   return typeof v === 'string' ? v : v == null ? '' : String(v)
-}
-
-function parseContext(raw: unknown): ComputerContextSnap {
-  const root = asObj(raw) || {}
-  const nested = asObj(root['context']) || asObj(root['result']) || asObj(root['task']) || root
-  const preview = asObj(nested['preview']) || asObj(nested['latest_preview']) || nested
-  const taskId = str(
-    nested['task_id'] ||
-      nested['taskId'] ||
-      preview['task_id'] ||
-      preview['taskId'] ||
-      nested['active_task_id'] ||
-      nested['id']
-  )
-  const sha256 = str(preview['sha256'] || preview['hash'] || nested['sha256'] || nested['preview_sha256'])
-  return {
-    taskId: taskId || undefined,
-    sha256: sha256 || undefined,
-    status: str(nested['status'] || nested['state']) || undefined,
-    url: str(nested['url'] || nested['current_url'] || preview['url']) || undefined,
-    title: str(nested['title'] || preview['title']) || undefined,
-    raw: nested
-  }
 }
 
 /**
@@ -64,7 +33,7 @@ export function ComputerSection({ accountId }: { accountId: string }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
   const [hint, setHint] = useState<string>()
-  const [ctx, setCtx] = useState<ComputerContextSnap | null>(null)
+  const [ctx, setCtx] = useState<ReturnType<typeof parseComputerContext> | null>(null)
   const [previewDataUrl, setPreviewDataUrl] = useState<string | null>(null)
   const [manualTaskId, setManualTaskId] = useState('')
   const [taskDetail, setTaskDetail] = useState<Record<string, unknown> | null>(null)
@@ -107,7 +76,7 @@ export function ComputerSection({ accountId }: { accountId: string }) {
         setVmHealth(str(h?.['status'] ?? h?.['state'] ?? 'RUNNING') || 'RUNNING')
       }
       if (ctxRaw) {
-        const parsed = parseContext(ctxRaw)
+        const parsed = parseComputerContext(ctxRaw)
         setCtx(parsed)
         const tid = parsed.taskId || manualTaskId.trim()
         if (tid && parsed.sha256) {

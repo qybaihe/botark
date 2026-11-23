@@ -1,3 +1,4 @@
+import { parseComputerContext } from '@/components/muse/computerContext'
 import { memo, useEffect, useState } from 'react'
 import { AlertCircle, Check, Clock3, Copy, CornerDownRight, Download, ExternalLink, FileText, Film, Globe, Image as ImageIcon, KeyRound, Loader2, Maximize2, Monitor, Music, RotateCw, Wrench, X, ZoomIn, ZoomOut } from 'lucide-react'
 import { cn } from '@/lib/cn'
@@ -1429,47 +1430,37 @@ function SessionInteractiveCard({
   const openWebSessionAt = useBotStore((s) => s.openWebSessionAt)
   const [previewSrc, setPreviewSrc] = useState<string | null>(null)
 
+  const [refresh, setRefresh] = useState(0)
+  const [loading, setLoading] = useState(false)
+  const [previewError, setPreviewError] = useState('')
   useEffect(() => {
-    if (widget.cardType === 'vault') return
-    let cancelled = false
+    let current = true
     const muse = getBridge()?.muse
-    if (!muse?.rpc) return
+    setPreviewSrc(null)
+    setPreviewError('')
+    setLoading(false)
+    if (widget.cardType === 'vault' || !muse || (!widget.taskId && !widget.previewSha256)) return
+    setLoading(true)
     void (async () => {
-      try {
-        let tid = widget.taskId
-        let sha = widget.previewSha256
-        if (!tid || !sha) {
-          const ctx = await muse.rpc({ accountId, method: 'computer.context', params: {} }).catch(() => null)
-          if (ctx && typeof ctx === 'object') {
-            const c = ctx as Record<string, unknown>
-            const inner = (c['context'] && typeof c['context'] === 'object' ? c['context'] : c) as Record<string, unknown>
-            const prev = (inner['preview'] && typeof inner['preview'] === 'object' ? inner['preview'] : inner) as Record<string, unknown>
-            tid = tid || (typeof inner['task_id'] === 'string' ? inner['task_id'] : undefined)
-            sha = sha || (typeof prev['sha256'] === 'string' ? prev['sha256'] : undefined)
-          }
+      let taskId = widget.taskId
+      let sha = widget.previewSha256
+      if (!taskId || !sha || refresh > 0) {
+        const snapshot = parseComputerContext(await muse.rpc({ accountId, method: 'computer.context', params: {} }))
+        // Match the card to the task before accepting a newer account-level preview.
+        if (taskId ? snapshot.taskId === taskId : sha === snapshot.sha256) {
+          taskId = snapshot.taskId
+          sha = snapshot.sha256 ?? sha
         }
-        if (tid && sha && !cancelled) {
-          const res = await muse.rpc({
-            accountId,
-            method: 'computer.preview',
-            params: { task_id: tid, sha256: sha }
-          })
-          if (!cancelled && res && typeof res === 'object') {
-            const o = res as Record<string, unknown>
-            if (typeof o['dataBase64'] === 'string' && o['dataBase64']) {
-              const mime = typeof o['contentType'] === 'string' ? o['contentType'] : 'image/png'
-              setPreviewSrc(`data:${mime};base64,${o['dataBase64']}`)
-            }
-          }
-        }
-      } catch {
-        /* preview optional */
       }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [accountId, widget.cardType, widget.previewSha256, widget.taskId])
+      if (!current || !taskId || !sha) return
+      const res = await muse.rpc({ accountId, method: 'computer.preview', params: { task_id: taskId, sha256: sha } })
+      const data = res as { dataBase64?: string; contentType?: string } | null
+      if (current && data?.dataBase64) setPreviewSrc(`data:${data.contentType || 'image/png'};base64,${data.dataBase64}`)
+    })().catch((err) => {
+      if (current && refresh > 0) setPreviewError(err instanceof Error ? err.message : String(err))
+    }).finally(() => { if (current) setLoading(false) })
+    return () => { current = false }
+  }, [accountId, widget.cardType, widget.previewSha256, widget.taskId, refresh])
 
   const isVault = widget.cardType === 'vault'
   const isSaved = widget.status === '已登录'
@@ -1540,7 +1531,15 @@ function SessionInteractiveCard({
         </button>
       )}
 
+      {previewError && <p role="status" className="mt-2 text-[12px] text-status-error">{previewError}</p>}
       <div className="mt-3 flex items-center gap-2">
+        {!isVault && (widget.taskId || widget.previewSha256) && (
+          <button type="button" aria-label="刷新截图" title="刷新截图" disabled={loading}
+            onClick={() => setRefresh((n) => n + 1)}
+            className="press-icon grid size-8 shrink-0 place-items-center rounded-full border border-line text-ink-secondary">
+            <RotateCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />
+          </button>
+        )}
         <button
           type="button"
           onClick={openInApp}

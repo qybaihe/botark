@@ -1,3 +1,4 @@
+import { currentHarkBrowser } from '@shared/harkBrowserPreview'
 import { randomUUID } from 'node:crypto'
 import { setTimeout as delay } from 'node:timers/promises'
 import { BrowserWindow, ipcMain, type IpcMainInvokeEvent } from 'electron'
@@ -37,6 +38,7 @@ import {
   preparedSessionForAccount,
   readHarkStream,
   registerHarkViewStop,
+  type HarkActivityPanel,
   type HarkChatMessage,
   type HarkUploadedAttachment
 } from './harkClient'
@@ -129,10 +131,10 @@ function observeProject(event: IpcMainInvokeEvent, req: Extract<HarkRpcRequest, 
   visibleProjects.set(senderId, { accountId: req.accountId, subscription: req.subscription, stop })
   sender.once('destroyed', stop)
   sender.once('did-navigate', stop)
-  const update = (messages: HarkChatMessage[]) => {
+  const update = (messages: HarkChatMessage[], panels: HarkActivityPanel[]) => {
     if (!signal.aborted && !sender.isDestroyed()) sender.send(HARK_CHANNELS.event, {
       type: 'projectHistory', accountId: req.accountId, conversationId: req.conversationId,
-      subscription: req.subscription, messages: historyView(messages)
+      subscription: req.subscription, messages: historyView(messages), browserPreview: currentHarkBrowser(panels)
     })
   }
   void (async () => {
@@ -145,13 +147,13 @@ function observeProject(event: IpcMainInvokeEvent, req: Extract<HarkRpcRequest, 
         await readHarkStream(session, req.conversationId, manager, dial, signal, (frame) => {
           if (state.applyFrame(frame) && !timer) timer = setTimeout(() => {
             timer = undefined
-            update(state.orderedMessages())
+            update(state.orderedMessages(), state.extractPanels())
           }, 150)
         })
       } catch {
         if (!signal.aborted) {
           const snapshot = await fetchConversationSnapshotSummary(req.accountId, req.conversationId).catch(() => null)
-          if (snapshot) update(snapshot.messages)
+          if (snapshot) update(snapshot.messages, snapshot.panels)
         }
       }
       dial = 'reconnect'
@@ -217,6 +219,12 @@ async function runHarkRpc(req: HarkRpcRequest): Promise<HarkRpcResponse> {
         const conversationId = conversationIdFromPayload(result)
         if (!conversationId) throw new Error('Hark returned no project ID')
         return { ok: true, data: { conversationId } }
+      }
+      case 'browserPreview': {
+        const conversationId = req.conversationId ?? conversationIdFromPayload(await getMainConversation(req.accountId))
+        if (!conversationId) return { ok: true, data: null }
+        const snapshot = await fetchConversationSnapshotSummary(req.accountId, conversationId)
+        return { ok: true, data: currentHarkBrowser(snapshot.panels) }
       }
       case 'conversationSnapshot':
       case 'mainConversation': {

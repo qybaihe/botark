@@ -17,3 +17,22 @@ it('decodes split SSE records for the selected conversation and ignores heartbea
   const url = new URL((fetch.mock.calls as unknown as [string][])[0]![0])
   expect(url.searchParams.get('conversationId')).toBe('fixture/thread')
 })
+
+it('keeps the current browser frame in the selected conversation as Hark updates its activity window', async () => {
+  const { HarkConversationSyncState } = await import('./harkClient')
+  const { currentHarkBrowser } = await import('@shared/harkBrowserPreview')
+  const state = new HarkConversationSyncState()
+  state.applyFrame(JSON.stringify({ type: 'snapshot', data: {
+    windows: { w: { panels: [
+      { dispatchId: 'browser', kind: 'browser', status: 'active', title: 'Schedule', screenshot: { key: 'frame1' } },
+      { dispatchId: 'old', kind: 'browser', status: 'completed', screenshot: { key: 'old-frame' } }
+    ] } }
+  } }))
+  expect(currentHarkBrowser(state.extractPanels())).toMatchObject({ label: 'Schedule', screenshotKey: 'frame1' })
+  state.applyFrame(JSON.stringify({ type: 'patches', data: [{
+    op: 'panel_update', id: 'w', dispatchId: 'browser', fields: { screenshot: { key: 'frame2' } }
+  }] }))
+  expect(currentHarkBrowser(state.extractPanels())?.screenshotKey).toBe('frame2')
+  state.applyFrame(JSON.stringify({ type: 'snapshot', data: {} }))
+  expect(currentHarkBrowser(state.extractPanels())).toBeNull()
+})

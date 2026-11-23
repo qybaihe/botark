@@ -1040,6 +1040,14 @@ export class HarkConversationSyncState {
     for (const m of this.messages.values()) {
       for (const tc of m.toolCalls ?? []) {
         if (tc.screenshotKey || tc.screenshotUrl || tc.url || tc.command || /browser|computer|shell|coding/i.test(tc.name)) {
+          const panel = out.find((p) => p.dispatchId === tc.dispatchId)
+          if (panel) {
+            if (!panel.screenshotKey && !panel.screenshotUrl) {
+              panel.screenshotKey = tc.screenshotKey
+              panel.screenshotUrl = tc.screenshotUrl
+            }
+            continue
+          }
           out.push({
             dispatchId: tc.dispatchId,
             kind: tc.name,

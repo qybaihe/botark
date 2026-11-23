@@ -1,3 +1,4 @@
+import { HarkBrowserCard } from '../hark/HarkBrowserCard'
 import { useCallback, useMemo } from 'react'
 import type { AttachmentMeta, PlatformId } from '@adapters/types'
 import { ArkDrawerToggleSvg } from '@/components/ui/ArkGlyphs'
@@ -205,6 +206,10 @@ export function ChatArea() {
           <WebSessionPane key={`${bot.id}:${activeAccount.id}`} bot={bot} account={activeAccount} />
         ) : (
           <>
+            {bot.platformId === 'hark' && activeAccount && canSend && (
+              <HarkBrowserCard key={JSON.stringify([activeAccount.id, bot.activeSessionId])}
+                accountId={activeAccount.id} sessionId={bot.activeSessionId} />
+            )}
             {messages.length === 0 && !typing ? (
               <ConversationIntro
                 bot={bot}

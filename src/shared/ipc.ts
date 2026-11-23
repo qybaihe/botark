@@ -1,3 +1,4 @@
+import type { HarkBrowserPreview } from './harkBrowserPreview'
 /**
  * IPC contract between the renderer (via preload) and the main process.
  * Shared so channel names and payload shapes cannot drift apart.
@@ -898,7 +899,7 @@ export const HARK_CHANNELS = {
 } as const
 
 export type HarkMainEvent =
-  | { type: 'projectHistory'; accountId: string; conversationId: string; subscription: string; messages: unknown[] }
+  | { type: 'projectHistory'; accountId: string; conversationId: string; subscription: string; messages: unknown[]; browserPreview?: HarkBrowserPreview | null }
   | {
       type: 'login'
       accountId: string
@@ -959,6 +960,7 @@ export type HarkRpcRequest =
   | { accountId: string; op: 'mainConversation'; timezone?: string }
   | { accountId: string; op: 'observeProject'; conversationId: string; subscription: string }
   | { accountId: string; op: 'leaveProject'; subscription: string }
+  | { accountId: string; op: 'browserPreview'; conversationId?: string }
   | { accountId: string; op: 'conversationSnapshot'; conversationId: string }
   | { accountId: string; op: 'createConversation'; title: string; timezone?: string }
   | { accountId: string; op: 'conversationStatus' }
