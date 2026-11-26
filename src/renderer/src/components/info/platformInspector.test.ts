@@ -46,7 +46,7 @@ describe('platformInspector', () => {
     // Hermes exposes Gateway Overview + Tools & Skills.
     expect(PLATFORM_INSPECTORS.hermes.tabs.map((t) => t.id)).toEqual(['overview', 'computer'])
     expect(PLATFORM_INSPECTORS.hermes.supportsQuickNewConversation).toBe(true)
-    // Cue mirrors Grok Bot's 4 inspector tabs (Overview, Library, Computer, Agents) without empty web session.
+    // Cue mirrors Grok Bot's 4 inspector tabs (Overview, Library, Computer, Agents) and exposes its cue.im WebSession.
     expect(PLATFORM_INSPECTORS.cue.tabs.map((t) => t.id)).toEqual([
       'overview',
       'library',
@@ -62,10 +62,11 @@ describe('platformInspector', () => {
     expect(PLATFORM_INSPECTORS['ds-bot'].supportsWebSession).toBe(false)
   })
 
-  it('disables web session pane for Grok Bot, Hermes & Cue while keeping it on web-backed platforms', () => {
+  it('disables web session pane for Grok Bot, Hermes & DS Bot while keeping it on web-backed platforms', () => {
     expect(getPlatformInspector('grok').supportsWebSession).toBe(false)
     expect(getPlatformInspector('hermes').supportsWebSession).toBe(false)
-    expect(getPlatformInspector('cue').supportsWebSession).toBe(false)
+    expect(getPlatformInspector('ds-bot').supportsWebSession).toBe(false)
+    expect(getPlatformInspector('cue').supportsWebSession).toBe(true)
     expect(getPlatformInspector('antigravity').supportsWebSession).toBe(true)
     expect(getPlatformInspector('meta-muse').supportsWebSession).toBe(true)
     expect(getPlatformInspector('hark').supportsWebSession).toBe(true)

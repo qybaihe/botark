@@ -4,6 +4,9 @@ import type { PlatformAdapter } from '@adapters/types'
 import type { CueMainEvent } from '@shared/ipc'
 import { startAdapterBridge } from '@/services/adapterBridge'
 import { useBotStore } from '@/store/botStore'
+import { cancelPlatformTurn } from '@/store/platformCancel'
+import { cueHistory } from '@/store/historyNormalizers'
+import type { Bot } from '@/types'
 
 describe('Cue login flow deduplication & WebSession reset on new bots', () => {
   let stopBridge: (() => void) | undefined
@@ -257,5 +260,46 @@ describe('Cue login flow deduplication & WebSession reset on new bots', () => {
 
     const msgs = useBotStore.getState().messages[botId] ?? []
     expect(msgs.map((m) => m.text)).toEqual(['之前的问题', '之前的回复', '11'])
+  })
+
+  it('wires cancelPlatformTurn to Cue stopRun and preserves tools & media in cueHistory', async () => {
+    const rpc = vi.fn(async () => ({ ok: true, data: { stopped: true } }))
+    vi.stubGlobal('window', { electron: { cue: { rpc } } })
+
+    await cancelPlatformTurn({
+      id: 'bot_cue_cancel',
+      platformId: 'cue',
+      activeAccountId: 'acc_cue_cancel',
+      activeSessionId: 'sess_cue_cancel',
+      selectedAgentId: 'ag_cue_cancel'
+    } as Bot)
+
+    expect(rpc).toHaveBeenCalledWith({
+      accountId: 'acc_cue_cancel',
+      op: 'stopRun',
+      sessionId: 'sess_cue_cancel',
+      agentId: 'ag_cue_cancel'
+    })
+
+    const normalized = cueHistory(
+      [
+        {
+          id: 'm_rich',
+          role: 'bot',
+          text: '',
+          createdAtMs: 1700000200000,
+          tools: [{ id: 't1', name: 'browser', status: 'completed' }],
+          media: [{ kind: 'image', path: 'https://files.manuscdn.com/img.png', name: 'img.png' }]
+        }
+      ],
+      'bot_cue_cancel',
+      'acc_cue_cancel',
+      'ag_cue_cancel'
+    )
+    expect(normalized).toHaveLength(1)
+    expect(normalized[0]?.tools).toEqual([{ id: 't1', name: 'browser', status: 'completed' }])
+    expect(normalized[0]?.media).toEqual([
+      { kind: 'image', path: 'https://files.manuscdn.com/img.png', name: 'img.png' }
+    ])
   })
 })

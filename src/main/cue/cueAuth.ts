@@ -685,3 +685,70 @@ export function currentCueAuthForIdentity(original: CueMainAuth): CueMainAuth | 
   const identity = credentialIdentities.get(original)
   return current && identity && credentialIdentities.get(current) === identity ? current : undefined
 }
+
+/**
+ * Self-heal an expired browser-session Cue credential by recapturing a newer
+ * session cookie from the account's isolated Electron partition (e.g. after the
+ * user interacted with Cue inside WebSessionPane). Never crosses account identities.
+ */
+export async function tryRecaptureCueSessionCookie(
+  original: CueMainAuth
+): Promise<CueMainAuth | null> {
+  if (original.authKind !== 'session' || original.refreshToken) return null
+  if (currentCueAuthForIdentity(original) !== original) return null
+  const identity = credentialIdentities.get(original)
+  if (!identity) return null
+  const accountId = original.accountId
+  const revision = getCueCredentialRevision(accountId)
+  if (!cueCookieCaptureAllowed(accountId)) return null
+  try {
+    if (typeof electronSession?.fromPartition !== 'function') return null
+    const ses = electronSession.fromPartition(partitionForAccount(accountId))
+    const cookies = await ses.cookies.get({})
+    const sessionCookies = selectCueSessionCookies(cookies.filter((cookie) => cookie.domain))
+    const primary = sessionCookies[0]
+    if (!primary || !primary.value || primary.value === original.accessToken) return null
+    const claims = decodeJwtClaims(primary.value)
+    // Refuse to adopt a cookie belonging to a different Cue user identity.
+    if (original.accountSlot && claims.handle && claims.handle !== original.accountSlot) {
+      return null
+    }
+    const scoped = cueCookiesForOrigin(sessionCookies, cueCookieOrigin(primary.domain))
+    return await withVaultLock(async () => {
+      if (
+        getCueCredentialRevision(accountId) !== revision ||
+        getCueMainAuth(accountId) !== original ||
+        currentCueAuthForIdentity(original) !== original
+      ) {
+        return null
+      }
+      return await saveCueTokens(
+        accountId,
+        {
+          accessToken: primary.value,
+          cookieHeader: scoped.map(({ name, value }) => `${name}=${value}`).join('; '),
+          cookieNames: scoped.map(({ name }) => name),
+          cookies: sessionCookies.map((c) => ({
+            name: c.name,
+            value: c.value,
+            domain: c.domain || '.cue.im',
+            path: c.path || '/'
+          })),
+          handle: claims.handle || original.handle,
+          displayName: claims.displayName || original.displayName,
+          accountSlot: original.accountSlot || claims.handle,
+          baseUrl: original.baseUrl,
+          expiresAtMs: claims.expiresAtMs,
+          authKind: 'session'
+        },
+        identity,
+        () =>
+          getCueCredentialRevision(accountId) === revision &&
+          getCueMainAuth(accountId) === original,
+        true
+      )
+    })
+  } catch {
+    return null
+  }
+}

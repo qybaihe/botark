@@ -68,6 +68,16 @@ function isGrokMedia(accountId: string | undefined, path: string): boolean {
   return false
 }
 
+function isCueMedia(accountId: string | undefined, path: string): boolean {
+  const trimmed = path.trim()
+  if (!trimmed || /^data:/i.test(trimmed)) return false
+  if (/^https?:\/\/(?:[^/]*\.)?(?:cue\.im|manus\.im|manus\.ai|manuscdn\.com)\//i.test(trimmed)) {
+    return true
+  }
+  if (accountId && useBotStore.getState().accounts[accountId]?.platformId === 'cue') return true
+  return false
+}
+
 function isMuseAuthHttpUrl(path: string): boolean {
   return /^https?:\/\/(?:[^/]*\.)?muse\.ai\//i.test(path.trim())
 }
@@ -77,7 +87,8 @@ function needsAuthProxyHttpUrl(path: string): boolean {
   return (
     /^https?:\/\/(?:[^/]*\.)?muse\.ai\//i.test(trimmed) ||
     /^https?:\/\/app\.hark\.com\/api\//i.test(trimmed) ||
-    /^https?:\/\/(?:[^/]*\.)?chatgpt\.com\/backend-api\//i.test(trimmed)
+    /^https?:\/\/(?:[^/]*\.)?chatgpt\.com\/backend-api\//i.test(trimmed) ||
+    /^https?:\/\/(?:[^/]*\.)?(?:cue\.im|api\.manus\.im|api\.manus\.ai)\//i.test(trimmed)
   )
 }
 
@@ -225,6 +236,27 @@ async function downloadGrokMedia(accountId: string, part: ChatMediaPart) {
   return d
 }
 
+async function downloadCueMedia(accountId: string, part: ChatMediaPart) {
+  const bridge = getBridge()?.cue
+  if (!bridge?.rpc) throw new Error('Cue download unavailable')
+  const dl = await bridge.rpc({
+    accountId,
+    op: 'downloadMedia',
+    url: part.path,
+    name: part.name
+  })
+  if (!dl.ok || !dl.data || typeof dl.data !== 'object') {
+    throw new Error(!dl.ok ? dl.message : 'Cue media download failed')
+  }
+  const d = dl.data as { dataBase64?: string; mimeType?: string; filename?: string }
+  if (!d.dataBase64) throw new Error('Empty Cue media payload')
+  return {
+    dataBase64: d.dataBase64,
+    mimeType: d.mimeType || part.mimeType || 'application/octet-stream',
+    filename: d.filename || part.name
+  }
+}
+
 async function fetchPlatformMediaBytes(
   accountId: string,
   part: ChatMediaPart
@@ -252,6 +284,9 @@ async function fetchPlatformMediaBytes(
   }
   if (isGrokMedia(accountId, rawPath)) {
     return downloadGrokMedia(accountId, part)
+  }
+  if (isCueMedia(accountId, rawPath)) {
+    return downloadCueMedia(accountId, part)
   }
   return null
 }

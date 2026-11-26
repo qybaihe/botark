@@ -1,14 +1,15 @@
 /**
  * Per-account watch controller for Cue by Manus (`cueWatchManager.ts`).
  * Mirrors `grokWatchManager.ts`: isolates watch loops, pending approvals,
- * and stream fan-out per `accountId`, and cleans up all watches on quit.
+ * watched sessions, and stream fan-out per `accountId`, and cleans up all watches on quit.
  */
 import type { CueTurnEvent } from '../../adapters/cue/events'
 import { stopCueChatSocket } from './cueChatSocket'
 
-interface CueAccountWatchController {
+export interface CueAccountWatchController {
   accountId: string
   agentIds: Set<string>
+  sessionAgents: Map<string, string>
   aborted: boolean
   abortController: AbortController
   pendingApprovals: Map<string, Record<string, unknown>>
@@ -29,6 +30,11 @@ export function emitCueWatchEvent(event: CueTurnEvent): void {
   }
 }
 
+export function getCueAccountWatch(accountId: string): CueAccountWatchController | undefined {
+  const ctrl = watches.get(accountId)
+  return ctrl && !ctrl.aborted ? ctrl : undefined
+}
+
 export function ensureCueAccountWatch(
   accountId: string,
   agentIds: string[] = []
@@ -38,6 +44,7 @@ export function ensureCueAccountWatch(
     existing = {
       accountId,
       agentIds: new Set(agentIds),
+      sessionAgents: new Map(),
       aborted: false,
       abortController: new AbortController(),
       pendingApprovals: new Map()
@@ -65,6 +72,7 @@ export function stopCueAccountWatch(accountId: string): void {
       ctrl.aborted = true
       ctrl.abortController.abort()
       ctrl.pendingApprovals.clear()
+      ctrl.sessionAgents.clear()
     }
     watches.clear()
     return
@@ -74,6 +82,7 @@ export function stopCueAccountWatch(accountId: string): void {
   ctrl.aborted = true
   ctrl.abortController.abort()
   ctrl.pendingApprovals.clear()
+  ctrl.sessionAgents.clear()
   watches.delete(accountId)
 }
 

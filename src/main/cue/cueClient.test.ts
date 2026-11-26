@@ -27,11 +27,13 @@ vi.mock('./cueDeviceId', () => ({
 }))
 
 import {
+  downloadCueMedia,
   extractCueHistoryMessages,
   fetchCueAgents,
   fetchCueQuota,
   fetchCueSessionHistory,
-  mapCueMembershipQuota
+  mapCueMembershipQuota,
+  verifyCueNativeCredentials
 } from './cueClient'
 
 describe('Cue native Connect-RPC client & history parser', () => {
@@ -263,7 +265,13 @@ describe('Cue native Connect-RPC client & history parser', () => {
     expect(extractCueHistoryMessages(cascadeSample)).toEqual([
       { id: 'u_turn1', role: 'user', text: '美国节点延迟怎么样', createdAtMs: 1700000010000 },
       { id: 'a_turn1_lead', role: 'bot', text: '正在帮你测试节点延迟…', createdAtMs: 1700000011000 },
-      { id: 'a_turn1_done', role: 'bot', text: '测试完成，美国节点平均 180ms。', createdAtMs: 1700000012000 },
+      {
+        id: 'a_turn1_done',
+        role: 'bot',
+        text: '测试完成，美国节点平均 180ms。',
+        createdAtMs: 1700000012000,
+        tools: [{ id: 'tool_1', name: 'shell', toolType: 'shell', status: 'completed' }]
+      },
       { id: 'u_turn2', role: 'user', text: '好的谢谢', createdAtMs: 1700000020000 },
       { id: 'a_turn2', role: 'bot', text: '不客气！', createdAtMs: 1700000021000 }
     ])
@@ -332,5 +340,96 @@ describe('Cue native Connect-RPC client & history parser', () => {
     expect(hist.messages.map((m) => m.id)).toEqual(['v2_1', 'v2_2'])
     expect(String(fetcherMock.mock.calls[1]![0])).toContain('/api/chat/getSessionV2?')
     expect(String(fetcherMock.mock.calls[1]![0])).toContain('type=private')
+  })
+
+  it('extracts media attachments from chat history events including media-only replies', () => {
+    const messages = extractCueHistoryMessages({
+      events: [
+        {
+          id: 'm_img',
+          type: 'chat',
+          sender: 'assistant',
+          content: '',
+          timestamp: 1700000100,
+          attachments: [
+            {
+              id: 'f_1',
+              url: 'https://files.manuscdn.com/chart.png',
+              filename: 'chart.png',
+              mimeType: 'image/png'
+            },
+            {
+              id: 'f_2',
+              url: 'https://api.manus.im/files/report.pdf',
+              filename: 'report.pdf',
+              mimeType: 'application/pdf'
+            }
+          ]
+        }
+      ]
+    })
+    expect(messages).toEqual([
+      {
+        id: 'm_img',
+        role: 'bot',
+        text: '',
+        createdAtMs: 1700000100000,
+        media: [
+          {
+            kind: 'image',
+            path: 'https://files.manuscdn.com/chart.png',
+            name: 'chart.png',
+            mimeType: 'image/png',
+            imageId: 'f_1'
+          },
+          {
+            kind: 'file',
+            path: 'https://api.manus.im/files/report.pdf',
+            name: 'report.pdf',
+            mimeType: 'application/pdf',
+            imageId: 'f_2'
+          }
+        ]
+      }
+    ])
+  })
+
+  it('live-verifies native Cue tokens before saving and rejects expired credentials', async () => {
+    const okFetch = vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json({ agents: [] }))
+    const ok = await verifyCueNativeCredentials(
+      'acc_verify',
+      { accessToken: 'good_tok', authKind: 'session' },
+      { fetchImpl: okFetch }
+    )
+    expect(ok).toEqual({ ok: true, status: 200 })
+
+    const badFetch = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response('Unauthorized', { status: 401 }))
+    const bad = await verifyCueNativeCredentials(
+      'acc_verify',
+      { accessToken: 'bad_tok', authKind: 'session' },
+      { fetchImpl: badFetch }
+    )
+    expect(bad.ok).toBe(false)
+    expect(bad.status).toBe(401)
+  })
+
+  it('proxy-downloads Cue media while enforcing HTTPS allowlist', async () => {
+    const rejected = await downloadCueMedia('acc_cue_1', 'https://evil.example.com/secret.png')
+    expect(rejected.ok).toBe(false)
+    if (!rejected.ok) expect(rejected.status).toBe(403)
+
+    const bytes = new Uint8Array([137, 80, 78, 71])
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      new Response(bytes, { status: 200, headers: { 'content-type': 'image/png' } })
+    )
+    const ok = await downloadCueMedia('acc_cue_1', 'https://api.manus.im/files/plot.png', {
+      fetchImpl
+    })
+    expect(ok.ok).toBe(true)
+    if (ok.ok) {
+      expect(ok.data.mimeType).toBe('image/png')
+      expect(ok.data.filename).toBe('plot.png')
+      expect(Buffer.from(ok.data.dataBase64, 'base64')).toEqual(Buffer.from(bytes))
+    }
   })
 })

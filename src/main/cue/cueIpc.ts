@@ -13,24 +13,36 @@ import { loadAccountProxyUrl } from '../muse/accountProxy'
 import {
   clearCueAccountAuth,
   currentCueAuthForIdentity,
+  getCueCredentialRevision,
   hasValidCueAuth,
   importCueCredentials,
-  getCueCredentialRevision,
   listSavedCueAccountIds,
   loadCueTokens,
+  parseAnyCueCredentialInput,
   persistCueTokens
 } from './cueAuth'
 import {
   callCueApi,
+  downloadCueMedia,
   fetchCueAgentById,
   fetchCueAgents,
   fetchCueQuota,
-  fetchCueSessionHistory
+  fetchCueSessionHistory,
+  verifyCueNativeCredentials
 } from './cueClient'
-import { sendCueNativeMessage } from './cueChatSocket'
+import {
+  cancelCueNativeTurn,
+  sendCueNativeMessage,
+  syncCueWatchedSessions
+} from './cueChatSocket'
 import { onCueHandoffSignedIn, revokeCueLoginNonce } from './cueDesktopHandoff'
 import { getOrCreateCueDeviceId } from './cueDeviceId'
-import { runCueOpenApi, verifyCueApiKey } from './cueOpenApi'
+import {
+  runCueOpenApi,
+  stopCueOpenApiTask,
+  uploadCueOpenApiAttachment,
+  verifyCueApiKey
+} from './cueOpenApi'
 import {
   cancelCueLogin,
   closeCueLoginWindow,
@@ -39,6 +51,7 @@ import {
   tryCapturePartitionCookies
 } from './cueLogin'
 import {
+  emitCueWatchEvent,
   ensureCueAccountWatch,
   setCueWatchEventEmitter,
   stopCueAccountWatch
@@ -63,9 +76,9 @@ async function buildAuthStatus(accountId: string): Promise<CueAuthStatus> {
       loaded = await loadCueTokens(accountId)
     }
   }
-  const signedIn = Boolean(
-    loaded && (loaded.accessToken || loaded.apiKey || loaded.cookieHeader)
-  ) || (await hasValidCueAuth(accountId))
+  const signedIn =
+    Boolean(loaded && (loaded.accessToken || loaded.apiKey || loaded.cookieHeader)) ||
+    (await hasValidCueAuth(accountId))
   const hasProxy = Boolean(await loadAccountProxyUrl(accountId).catch(() => true))
   const deviceId = loaded?.deviceId ?? getOrCreateCueDeviceId(accountId)
   return {
@@ -94,7 +107,7 @@ async function buildSessionPayload(accountId: string): Promise<CueAuthSessionPay
 }
 
 async function resolveNativeSession(
-  req: Extract<CueRpcRequest, { op: 'sendMessage' | 'getHistory' }>
+  req: { accountId: string; sessionId?: string; agentId?: string }
 ): Promise<{ sessionId: string } | Extract<CueRpcResponse, { ok: false }>> {
   const sessionId = req.sessionId?.trim()
   if (sessionId) return { sessionId }
@@ -127,12 +140,19 @@ export async function runCueRpc(req: CueRpcRequest & { requestId?: string }): Pr
         auth = await loadCueTokens(req.accountId)
       }
     }
+    if (req.op === 'downloadMedia') {
+      return await downloadCueMedia(req.accountId, req.url, { name: req.name })
+    }
     const baseUrl = req.baseUrl || auth?.baseUrl
     if (auth?.apiKey && !baseUrl) {
       const openedWith = auth
-      return await runCueOpenApi(req, auth.apiKey, { beforeRequest: () => {
-        if (!currentCueAuthForIdentity(openedWith)) throw new Error('Cue 账号已更改，请重试')
-      } })
+      return await runCueOpenApi(req, auth.apiKey, {
+        requestId: req.requestId,
+        onEvent: (event) => emitCueWatchEvent(event),
+        beforeRequest: () => {
+          if (!currentCueAuthForIdentity(openedWith)) throw new Error('Cue 账号已更改，请重试')
+        }
+      })
     }
     if (!baseUrl) {
       if (!auth || (!auth.accessToken && !auth.cookieHeader && !(await hasValidCueAuth(req.accountId)))) {
@@ -140,7 +160,18 @@ export async function runCueRpc(req: CueRpcRequest & { requestId?: string }): Pr
       }
       // Native Cue Desktop protocol (Connect-RPC `api.manus.im` + Engine.IO/Socket.IO WebSocket)
       switch (req.op) {
-        case 'health':
+        case 'health': {
+          const probe = await fetchCueAgents(req.accountId, { limit: 1 }).catch(() => null)
+          if (probe && !probe.ok && (probe.status === 401 || probe.status === 403)) {
+            return { ok: false, status: probe.status, message: 'Cue 会话已失效，请重新登录' }
+          }
+          if (probe && !probe.ok) {
+            return {
+              ok: false,
+              status: probe.status,
+              message: probe.error || `Cue 健康检查失败（${probe.status}）`
+            }
+          }
           return {
             ok: true,
             data: {
@@ -151,11 +182,28 @@ export async function runCueRpc(req: CueRpcRequest & { requestId?: string }): Pr
               authKind: auth?.authKind ?? 'session'
             }
           }
+        }
         case 'listAgents': {
           ensureCueAccountWatch(req.accountId)
           const res = await fetchCueAgents(req.accountId, { limit: 50 }).catch(() => null)
+          if (res && !res.ok && (res.status === 401 || res.status === 403)) {
+            return { ok: false, status: res.status, message: 'Cue 会话已失效，请重新登录' }
+          }
           if (res?.ok && res.agents.length > 0) {
+            const sessions = res.agents
+              .filter((agent): agent is typeof agent & { sessionId: string } => Boolean(agent.sessionId))
+              .map((agent) => ({ sessionId: agent.sessionId, agentId: agent.id }))
+            if (sessions.length > 0 && typeof syncCueWatchedSessions === 'function') {
+              void syncCueWatchedSessions(req.accountId, sessions).catch(() => undefined)
+            }
             return { ok: true, data: res.agents }
+          }
+          if (res && !res.ok) {
+            return {
+              ok: false,
+              status: res.status,
+              message: res.error || `加载 Cue Agent 列表失败（${res.status}）`
+            }
           }
           return {
             ok: true,
@@ -170,6 +218,9 @@ export async function runCueRpc(req: CueRpcRequest & { requestId?: string }): Pr
         }
         case 'listTasks': {
           const res = await fetchCueAgents(req.accountId, { limit: 50 }).catch(() => null)
+          if (res && !res.ok && (res.status === 401 || res.status === 403)) {
+            return { ok: false, status: res.status, message: 'Cue 会话已失效，请重新登录' }
+          }
           if (res?.ok) {
             return { ok: true, data: { tasks: res.agents } }
           }
@@ -197,10 +248,12 @@ export async function runCueRpc(req: CueRpcRequest & { requestId?: string }): Pr
             body: method === 'GET' ? undefined : (req.body ?? {})
           })
           if (!res.ok) {
-            const rec = res.data && typeof res.data === 'object' ? (res.data as Record<string, unknown>) : null
-            const msg = typeof rec?.['message'] === 'string' && rec['message'].trim()
-              ? rec['message'].trim()
-              : `Cue API call failed (${res.status})`
+            const rec =
+              res.data && typeof res.data === 'object' ? (res.data as Record<string, unknown>) : null
+            const msg =
+              typeof rec?.['message'] === 'string' && rec['message'].trim()
+                ? rec['message'].trim()
+                : `Cue API call failed (${res.status})`
             return { ok: false, status: res.status, message: msg }
           }
           return { ok: true, data: res.data }
@@ -211,21 +264,70 @@ export async function runCueRpc(req: CueRpcRequest & { requestId?: string }): Pr
           if (auth && !currentCueAuthForIdentity(auth)) {
             return { ok: false, status: 409, message: 'Cue 账号在发送前已更改，请重试' }
           }
+          const openedWith = auth
           const result = await sendCueNativeMessage({
             accountId: req.accountId,
             sessionId: resolved.sessionId,
             agentId: req.agentId,
             conversationId: req.conversationId,
             requestId: req.requestId,
-            text: req.text
+            text: req.text,
+            ...(req.attachments?.length
+              ? {
+                  attachments: req.attachments,
+                  uploadAttachment: async (att) => {
+                    const token = openedWith?.accessToken?.trim()
+                    if (!token) throw new Error('Cue 会话凭据缺失，无法上传附件')
+                    return uploadCueOpenApiAttachment(req.accountId, token, att, {
+                      asWebToken: true,
+                      beforeRequest: () => {
+                        if (openedWith && !currentCueAuthForIdentity(openedWith)) {
+                          throw new Error('Cue 账号在上传前已更改，请重试')
+                        }
+                      }
+                    })
+                  }
+                }
+              : {})
           })
           return { ok: true, data: result }
+        }
+        case 'stopRun': {
+          const cancelled =
+            typeof cancelCueNativeTurn === 'function'
+              ? cancelCueNativeTurn({
+                  accountId: req.accountId,
+                  sessionId: req.sessionId,
+                  requestId: req.requestId
+                })
+              : { cancelledCount: 0, sessionIds: [] }
+          let targetSessionId = req.sessionId?.trim() || cancelled.sessionIds[0]
+          if (!targetSessionId && req.agentId) {
+            const resolved = await resolveNativeSession(req).catch(() => null)
+            if (resolved && !('ok' in resolved)) targetSessionId = resolved.sessionId
+          }
+          let remoteStopped = false
+          if (targetSessionId && auth?.accessToken) {
+            const remote = await stopCueOpenApiTask(req.accountId, auth.accessToken, targetSessionId, {
+              asWebToken: true
+            }).catch(() => null)
+            remoteStopped = Boolean(remote?.ok)
+          }
+          return {
+            ok: true,
+            data: {
+              stopped: true,
+              cancelledTurns: cancelled.cancelledCount,
+              remoteStopped,
+              ...(targetSessionId ? { sessionId: targetSessionId } : {})
+            }
+          }
         }
         case 'watchUntilReply': {
           return { ok: true, data: { done: true } }
         }
         case 'approve': {
-          return { ok: false, status: 400, message: '请在 Cue 客户端确认该审批操作' }
+          return { ok: false, status: 400, message: '请在 Cue 客户端或内置网页视图中确认该审批操作' }
         }
         default:
           return { ok: false, status: 400, message: 'Unsupported Cue RPC op' }
@@ -271,13 +373,29 @@ export async function runCueRpc(req: CueRpcRequest & { requestId?: string }): Pr
             agentId: req.agentId,
             sessionId: req.sessionId,
             conversationId: req.conversationId,
-            text: req.text
+            text: req.text,
+            ...(req.attachments?.length ? { attachments: req.attachments } : {})
           }
         })
         if (!res.ok) {
           return { ok: false, status: res.status, message: `Cue sendMessage failed (${res.status})` }
         }
         return { ok: true, data: res.data }
+      }
+      case 'stopRun': {
+        const res = await callCueApi(req.accountId, '/messages/stop', {
+          method: 'POST',
+          baseUrl,
+          body: {
+            agentId: req.agentId,
+            sessionId: req.sessionId,
+            requestId: req.requestId
+          }
+        })
+        if (!res.ok && res.status !== 404) {
+          return { ok: false, status: res.status, message: `Cue stopRun failed (${res.status})` }
+        }
+        return { ok: true, data: res.ok ? res.data : { stopped: true } }
       }
       case 'watchUntilReply': {
         const res = await callCueApi(req.accountId, '/messages/watch', {
@@ -329,10 +447,12 @@ export async function runCueRpc(req: CueRpcRequest & { requestId?: string }): Pr
           body: method === 'GET' ? undefined : (req.body ?? {})
         })
         if (!res.ok) {
-          const rec = res.data && typeof res.data === 'object' ? (res.data as Record<string, unknown>) : null
-          const msg = typeof rec?.['message'] === 'string' && rec['message'].trim()
-            ? rec['message'].trim()
-            : `Cue API call failed (${res.status})`
+          const rec =
+            res.data && typeof res.data === 'object' ? (res.data as Record<string, unknown>) : null
+          const msg =
+            typeof rec?.['message'] === 'string' && rec['message'].trim()
+              ? rec['message'].trim()
+              : `Cue API call failed (${res.status})`
           return { ok: false, status: res.status, message: msg }
         }
         return { ok: true, data: res.data }
@@ -341,12 +461,94 @@ export async function runCueRpc(req: CueRpcRequest & { requestId?: string }): Pr
         return { ok: false, status: 400, message: `Unsupported Cue RPC op` }
     }
   } catch (error) {
+    const code =
+      error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
+        ? (error as { code: string }).code
+        : undefined
     return {
       ok: false,
-      status: 500,
+      status: code === 'cancelled' ? 499 : 500,
+      ...(code ? { code } : {}),
       message: error instanceof Error ? error.message : String(error)
     }
   }
+}
+
+export async function importAndVerifyCueCredentials(
+  req: CueImportCredentialsRequest
+): Promise<CueAuthStatus> {
+  const raw = req.credential ?? req.rawInput ?? req.accessToken ?? ''
+  revokeCueLoginNonce(req.accountId)
+  const revision = getCueCredentialRevision(req.accountId)
+  const trimmed = raw.trim()
+  const looksLikeSessionOrJwtOrJson =
+    /^(?:Cookie\s*:|Bearer\s+|\{|\[|eyJ[A-Za-z0-9_-]+\.)/i.test(trimmed) ||
+    (trimmed.includes('=') && /(?:cue_session|session_id|__Secure-)/i.test(trimmed))
+
+  const shouldLiveVerify = Boolean(req.verifyApiKey) && !req.skipVerify
+
+  if (!shouldLiveVerify) {
+    await importCueCredentials(req.accountId, raw)
+  } else {
+    let parsed: ReturnType<typeof parseAnyCueCredentialInput>
+    try {
+      parsed = parseAnyCueCredentialInput(raw)
+    } catch (parseErr) {
+      if (!looksLikeSessionOrJwtOrJson) {
+        const apiKey = trimmed.replace(/^x-manus-api-key:\s*/i, '')
+        if (!apiKey || /\s/.test(apiKey)) throw new Error('请填入完整的 Manus API Key')
+        parsed = { apiKey, authKind: 'api-key' }
+      } else {
+        throw parseErr
+      }
+    }
+
+    if (parsed.authKind === 'api-key' && parsed.apiKey && !parsed.baseUrl) {
+      const identity = await verifyCueApiKey(req.accountId, parsed.apiKey)
+      const previous = await loadCueTokens(req.accountId)
+      if (
+        previous?.apiKey &&
+        !previous.baseUrl &&
+        previous.accountSlot &&
+        previous.accountSlot !== identity.accountSlot
+      ) {
+        throw new Error('该 API Key 属于其他 Manus 账号，请选择「新增 Cue 账号」')
+      }
+      await persistCueTokens(
+        req.accountId,
+        { ...parsed, apiKey: parsed.apiKey, authKind: 'api-key', ...identity },
+        {
+          shouldSave: () => revision === getCueCredentialRevision(req.accountId)
+        }
+      )
+    } else if (
+      (parsed.authKind === 'session' || parsed.authKind === 'oauth') &&
+      !parsed.baseUrl
+    ) {
+      const verified = await verifyCueNativeCredentials(req.accountId, parsed)
+      if (!verified.ok) {
+        throw new Error(verified.message || 'Cue 凭据验证失败')
+      }
+      await persistCueTokens(req.accountId, parsed, {
+        shouldSave: () => revision === getCueCredentialRevision(req.accountId)
+      })
+    } else {
+      await persistCueTokens(req.accountId, parsed, {
+        shouldSave: () => revision === getCueCredentialRevision(req.accountId)
+      })
+    }
+  }
+
+  const st = await buildAuthStatus(req.accountId)
+  broadcast({
+    type: 'auth',
+    accountId: req.accountId,
+    signedIn: st.signedIn,
+    handle: st.handle,
+    displayName: st.displayName,
+    accountSlot: st.accountSlot
+  })
+  return st
 }
 
 export function registerCueIpc(): void {
@@ -409,37 +611,7 @@ export function registerCueIpc(): void {
   ipcMain.handle(
     CUE_CHANNELS.importCredentials,
     async (_event, req: CueImportCredentialsRequest) => {
-      const raw = req.credential ?? req.rawInput ?? req.accessToken ?? ''
-      revokeCueLoginNonce(req.accountId)
-      const revision = getCueCredentialRevision(req.accountId)
-      const trimmed = raw.trim()
-      const looksLikeSessionOrJwtOrJson =
-        /^(?:Cookie\s*:|Bearer\s+|\{|\[|eyJ[A-Za-z0-9_-]+\.)/i.test(trimmed) ||
-        (trimmed.includes('=') && /(?:cue_session|session_id|__Secure-)/i.test(trimmed))
-      if (req.verifyApiKey && !looksLikeSessionOrJwtOrJson) {
-        const apiKey = trimmed.replace(/^x-manus-api-key:\s*/i, '')
-        if (!apiKey || /\s/.test(apiKey)) throw new Error('请填入完整的 Manus API Key')
-        const identity = await verifyCueApiKey(req.accountId, apiKey)
-        const previous = await loadCueTokens(req.accountId)
-        if (previous?.apiKey && !previous.baseUrl && previous.accountSlot && previous.accountSlot !== identity.accountSlot) {
-          throw new Error('该 API Key 属于其他 Manus 账号，请选择「新增 Cue 账号」')
-        }
-        await persistCueTokens(req.accountId, { apiKey, authKind: 'api-key', ...identity }, {
-          shouldSave: () => revision === getCueCredentialRevision(req.accountId)
-        })
-      } else {
-        await importCueCredentials(req.accountId, raw)
-      }
-      const st = await buildAuthStatus(req.accountId)
-      broadcast({
-        type: 'auth',
-        accountId: req.accountId,
-        signedIn: st.signedIn,
-        handle: st.handle,
-        displayName: st.displayName,
-        accountSlot: st.accountSlot
-      })
-      return st
+      return importAndVerifyCueCredentials(req)
     }
   )
 

@@ -7,7 +7,13 @@
  * - Full `AbortSignal` support for `stopRoom` cancellation
  */
 import { createId } from '@shared/id'
-import type { CueRpcRequest, CueRpcResponse } from '@shared/ipc'
+import type {
+  CueAttachmentPayload,
+  CueMediaPayload,
+  CueRpcRequest,
+  CueRpcResponse,
+  CueToolCallPayload
+} from '@shared/ipc'
 import type { CueTurnEvent } from './events'
 import { getBotHubBridge } from '../meta-muse/electronBridge'
 import { statusAfterSendFailure } from '../sendFailure'
@@ -19,6 +25,8 @@ import {
   type ConnectionStatus,
   type IncomingMessage,
   type MuseApproval,
+  type MuseMediaPart,
+  type MuseToolCall,
   type OutgoingMessage,
   type PlatformAccount,
   type PlatformAdapter,
@@ -71,7 +79,10 @@ export class CueAdapter implements PlatformAdapter {
   private readonly pendingApprovals = new Map<string, MuseApproval[]>()
   private readonly sendQueues = new Map<string, Promise<SendReceipt>>()
   private readonly sendingByAccount = new Map<string, number>()
-  private readonly pendingSends = new Map<string, { accountId: string; accept: () => void; isCurrent: () => boolean }>()
+  private readonly pendingSends = new Map<
+    string,
+    { accountId: string; accept: () => void; touchProgress: () => void; isCurrent: () => boolean }
+  >()
   private readonly credentialGenerations = new Map<string, number>()
   private readonly listeners = new Set<AdapterListener>()
   private bridgeUnsub: Unsubscribe | null = null
@@ -134,6 +145,7 @@ export class CueAdapter implements PlatformAdapter {
 
     if (event.type === 'activity') {
       if (event.busy) {
+        pending?.touchProgress()
         this.setStatus(event.accountId, 'busy')
       } else if (!this.sendingByAccount.has(event.accountId) && this.getStatus(event.accountId) !== 'attention') {
         this.setStatus(event.accountId, 'online')
@@ -155,7 +167,11 @@ export class CueAdapter implements PlatformAdapter {
     }
 
     if (event.type === 'stream') {
+      pending?.touchProgress()
       const convId = event.conversationId ?? event.accountId
+      const tools = event.tools?.length ? (event.tools as MuseToolCall[]) : undefined
+      const media = event.media?.length ? (event.media as MuseMediaPart[]) : undefined
+      const hasContent = Boolean(event.text || tools?.length || media?.length)
       if (!event.done) {
         this.setStatus(event.accountId, 'busy')
         this.emit({
@@ -165,14 +181,16 @@ export class CueAdapter implements PlatformAdapter {
           accountId: event.accountId,
           isTyping: true
         })
-        if (event.text) {
+        if (hasContent) {
           this.emit({
             type: 'message_delta',
             messageId: event.messageId,
             conversationId: convId,
             sessionId: event.sessionId,
             accountId: event.accountId,
-            text: event.text
+            text: event.text || '',
+            ...(tools ? { tools } : {}),
+            ...(media ? { media } : {})
           })
         }
       } else {
@@ -184,7 +202,7 @@ export class CueAdapter implements PlatformAdapter {
           isTyping: false
         })
         this.setStatus(event.accountId, 'online')
-        if (event.text) {
+        if (hasContent) {
           this.emit({
             type: 'message',
             message: {
@@ -192,8 +210,10 @@ export class CueAdapter implements PlatformAdapter {
               conversationId: convId,
               sessionId: event.sessionId,
               accountId: event.accountId,
-              text: event.text,
-              createdAt: Date.now()
+              text: event.text || '',
+              createdAt: Date.now(),
+              ...(tools ? { tools } : {}),
+              ...(media ? { media } : {})
             }
           })
         }
@@ -387,13 +407,57 @@ export class CueAdapter implements PlatformAdapter {
 
     const requestId = createId('cue_req')
     let accepted = false
+    let activeSessionId = message.sessionId
+    let lastProgressAt = Date.now()
     const accept = () => {
       if (accepted) return
       accepted = true
       message.onAccepted?.()
     }
-    this.pendingSends.set(requestId, { accountId: message.accountId, accept, isCurrent })
+    const touchProgress = () => {
+      lastProgressAt = Date.now()
+    }
+    this.pendingSends.set(requestId, { accountId: message.accountId, accept, touchProgress, isCurrent })
+
+    let abortReject: ((err: Error) => void) | undefined
+    const abortRace = message.signal
+      ? new Promise<never>((_resolve, reject) => {
+          abortReject = reject
+        })
+      : null
+    const onSignalAbort = () => {
+      void bridge
+        .rpc({
+          accountId: message.accountId,
+          op: 'stopRun',
+          agentId,
+          sessionId: activeSessionId,
+          requestId
+        })
+        .catch(() => undefined)
+      abortReject?.(new AdapterError('network', 'Aborted'))
+    }
+    message.signal?.addEventListener('abort', onSignalAbort, { once: true })
+
+    const raceWithAbort = <T>(promise: Promise<T>): Promise<T> =>
+      abortRace ? Promise.race([promise, abortRace]) : promise
+
     try {
+      const wireAttachments: CueAttachmentPayload[] = []
+      if (message.attachments?.length) {
+        for (const att of message.attachments) {
+          if (!att.dataBase64) {
+            throw new AdapterError('network', `附件「${att.name}」数据不可用，请重新添加后发送`)
+          }
+          wireAttachments.push({
+            id: att.id,
+            name: att.name,
+            mimeType: att.mimeType,
+            size: att.size,
+            dataBase64: att.dataBase64
+          })
+        }
+      }
       const req: CueRpcRequest & { requestId: string } = {
         accountId: message.accountId,
         op: 'sendMessage',
@@ -401,13 +465,34 @@ export class CueAdapter implements PlatformAdapter {
         agentId,
         sessionId: message.sessionId,
         conversationId: message.conversationId,
-        text: message.text
+        text: message.text,
+        ...(wireAttachments.length > 0 ? { attachments: wireAttachments } : {})
       }
-      const res: CueRpcResponse = await bridge.rpc(req)
+      const res: CueRpcResponse = await raceWithAbort(bridge.rpc(req))
       if (message.signal?.aborted) {
         throw new AdapterError('network', 'Aborted')
       }
       if (!res.ok) {
+        if (res.code === 'cancelled' || res.status === 499) {
+          this.emit({
+            type: 'typing',
+            conversationId: message.conversationId,
+            sessionId: activeSessionId,
+            accountId: message.accountId,
+            isTyping: false
+          })
+          if (this.sendingByAccount.get(message.accountId) === 1) {
+            this.setStatus(message.accountId, 'online')
+          }
+          if (message.signal?.aborted) {
+            throw new AdapterError('network', 'Aborted')
+          }
+          return {
+            messageId: createId('cue_msg'),
+            acceptedAt: Date.now(),
+            sessionId: activeSessionId
+          }
+        }
         throw new AdapterError(
           res.status === 401 || res.status === 403 ? 'not-connected' : 'network',
           res.message || `Cue sendMessage failed (${res.status})`
@@ -423,33 +508,64 @@ export class CueAdapter implements PlatformAdapter {
         typeof data['sessionId'] === 'string' && data['sessionId']
           ? data['sessionId']
           : message.sessionId
+      activeSessionId = sessionId
       let replyObj =
         data['reply'] && typeof data['reply'] === 'object'
           ? (data['reply'] as Record<string, unknown>)
           : undefined
       if (data.awaitReply === true && sessionId) {
-        const until = Date.now() + 120_000
-        while (Date.now() < until) {
+        const startedAt = Date.now()
+        const maxPollMs = 10 * 60_000
+        const idlePollMs = 180_000
+        while (Date.now() - startedAt < maxPollMs && Date.now() - lastProgressAt < idlePollMs) {
           message.signal?.throwIfAborted()
           assertCredentials()
-          const polled = await bridge.rpc({
-            accountId: message.accountId,
-            op: 'watchUntilReply',
-            sessionId,
-            afterMessageId: typeof data.afterMessageId === 'string' ? data.afterMessageId : undefined,
-            expectedUserText: message.text
-          })
+          const polled = await raceWithAbort(
+            bridge.rpc({
+              accountId: message.accountId,
+              op: 'watchUntilReply',
+              requestId,
+              agentId,
+              sessionId,
+              conversationId: message.conversationId,
+              afterMessageId: typeof data.afterMessageId === 'string' ? data.afterMessageId : undefined,
+              expectedUserText: message.text
+            } as CueRpcRequest & { requestId?: string })
+          )
           message.signal?.throwIfAborted()
           assertCredentials()
           if (!polled.ok) {
-            throw new AdapterError(polled.status === 401 || polled.status === 403 ? 'not-connected' : 'network', polled.message)
+            if (polled.code === 'cancelled' || polled.status === 499) {
+              if (message.signal?.aborted) {
+                throw new AdapterError('network', 'Aborted')
+              }
+              this.emit({
+                type: 'typing',
+                conversationId: message.conversationId,
+                sessionId,
+                accountId: message.accountId,
+                isTyping: false
+              })
+              if (this.sendingByAccount.get(message.accountId) === 1) {
+                this.setStatus(message.accountId, 'online')
+              }
+              return {
+                messageId: createId('cue_msg'),
+                acceptedAt: Date.now(),
+                sessionId
+              }
+            }
+            throw new AdapterError(
+              polled.status === 401 || polled.status === 403 ? 'not-connected' : 'network',
+              polled.message
+            )
           }
           const result = polled.data as { done?: boolean; reply?: Record<string, unknown> } | null
           if (result?.done) {
             replyObj = result.reply
             break
           }
-          await new Promise((resolve) => setTimeout(resolve, 2500))
+          await raceWithAbort(new Promise((resolve) => setTimeout(resolve, 2500)))
         }
       }
       const replyText =
@@ -458,6 +574,12 @@ export class CueAdapter implements PlatformAdapter {
           : typeof data['text'] === 'string'
             ? data['text']
             : ''
+      const replyTools = Array.isArray(replyObj?.['tools'])
+        ? (replyObj['tools'] as CueToolCallPayload[])
+        : undefined
+      const replyMedia = Array.isArray(replyObj?.['media'])
+        ? (replyObj['media'] as CueMediaPayload[])
+        : undefined
       const replyId =
         typeof replyObj?.['id'] === 'string'
           ? replyObj['id']
@@ -475,8 +597,22 @@ export class CueAdapter implements PlatformAdapter {
       if (this.sendingByAccount.get(message.accountId) === 1) this.setStatus(message.accountId, 'online')
 
       const replies = Array.isArray(data.replies)
-        ? data.replies as Array<{ id: string; text: string }>
-        : replyText ? [{ id: replyId, text: replyText }] : []
+        ? (data.replies as Array<{
+            id: string
+            text: string
+            tools?: CueToolCallPayload[]
+            media?: CueMediaPayload[]
+          }>)
+        : replyText || replyMedia?.length
+          ? [
+              {
+                id: replyId,
+                text: replyText,
+                ...(replyTools?.length ? { tools: replyTools } : {}),
+                ...(replyMedia?.length ? { media: replyMedia } : {})
+              }
+            ]
+          : []
       for (const reply of replies) {
         const incoming = {
           id: reply.id,
@@ -485,7 +621,9 @@ export class CueAdapter implements PlatformAdapter {
           accountId: message.accountId,
           text: reply.text,
           createdAt: Date.now(),
-          authoritative: true
+          authoritative: true,
+          ...(reply.tools?.length ? { tools: reply.tools as MuseToolCall[] } : {}),
+          ...(reply.media?.length ? { media: reply.media as MuseMediaPart[] } : {})
         }
         this.emit({
           type: 'message',
@@ -497,13 +635,13 @@ export class CueAdapter implements PlatformAdapter {
         messageId: typeof data['messageId'] === 'string' ? data['messageId'] : replyId,
         acceptedAt: Date.now(),
         sessionId,
-        ...(replies.some((reply) => reply.text) ? {} : { noReply: true })
+        ...(replies.some((reply) => reply.text || reply.media?.length) ? {} : { noReply: true })
       }
     } catch (error) {
       this.emit({
         type: 'typing',
         conversationId: message.conversationId,
-        sessionId: message.sessionId,
+        sessionId: activeSessionId,
         accountId: message.accountId,
         isTyping: false
       })
@@ -519,6 +657,7 @@ export class CueAdapter implements PlatformAdapter {
       }
       throw error instanceof AdapterError ? error : new AdapterError('network', detail)
     } finally {
+      message.signal?.removeEventListener('abort', onSignalAbort)
       this.pendingSends.delete(requestId)
       const remaining = (this.sendingByAccount.get(message.accountId) ?? 1) - 1
       if (remaining) this.sendingByAccount.set(message.accountId, remaining)

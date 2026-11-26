@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Check, Copy, Cpu, ExternalLink, FileText, Link2, RefreshCw, Sparkles } from 'lucide-react'
+import { Check, Copy, Cpu, ExternalLink, FileText, Globe, Link2, RefreshCw, Sparkles } from 'lucide-react'
 import type { CueAuthStatus, CueRpcRequest } from '@shared/ipc'
 import { asObj } from '@shared/parse'
 import { EmptyLine, Section } from '@/components/info/Section'
@@ -174,6 +174,22 @@ function useCueSectionLoader<T>(
   return { data: visible?.data ?? fallback, loading: visible?.loading ?? false, error: visible?.error, refresh, isOnline }
 }
 
+function useCueAuthKind(accountId: string | undefined): CueAuthStatus['authKind'] | undefined {
+  const { data } = useCueSectionLoader<CueAuthStatus['authKind'] | undefined>(
+    accountId,
+    async () => {
+      const cue = getBridge()?.cue
+      if (!cue?.authStatus || !accountId) return undefined
+      const st = await readOnce(['authStatus', accountId], () => cue.authStatus(accountId)).catch(() => null)
+      return st?.authKind
+    },
+    [],
+    undefined,
+    true
+  )
+  return data
+}
+
 /**
  * 1. Cue Account Auth & Credential Import Card (parity with `GrokAccountAuthSection`).
  */
@@ -326,6 +342,7 @@ export function CueAccountAuthSection({ accountId }: { accountId: string }) {
  */
 export function CueOverviewSection({ bot, account }: { bot: Bot; account?: BotAccount }) {
   const syncCueAccountBots = useBotStore((s) => s.syncCueAccountBots)
+  const openWebSessionAt = useBotStore((s) => s.openWebSessionAt)
 
   const [syncing, setSyncing] = useState(false)
 
@@ -446,6 +463,16 @@ export function CueOverviewSection({ bot, account }: { bot: Bot; account?: BotAc
           <RefreshCw className={cn('size-3.5', syncing && 'animate-spin')} />
           同步 Agent
         </Button>
+        {!isApiKey && (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => openWebSessionAt(null)}
+          >
+            <Globe className="size-3.5" />
+            内置网页视图
+          </Button>
+        )}
       </div>
     </div>
   )
@@ -514,11 +541,14 @@ export function CueSessionsSection({ accountId, bot }: { accountId: string; bot:
  * 4. Scheduled Tasks / Automations (parity with `GrokAutomationsSection`).
  */
 export function CueAutomationsSection({ accountId }: { accountId: string }) {
+  const authKind = useCueAuthKind(accountId)
+  const isApiKey = authKind === 'api-key'
   const { data: tasks, loading, error, refresh } = useCueSectionLoader<
     Array<{ id: string; name: string; schedule: string; enabled: boolean }>
   >(
     accountId,
     async () => {
+      if (isApiKey) return []
       const raw = await callCueEndpoint(accountId, '/session.v1.SessionService/ListScheduledTasks', {
         page: 1,
         pageSize: 50
@@ -540,7 +570,7 @@ export function CueAutomationsSection({ accountId }: { accountId: string }) {
           Boolean(x)
         )
     },
-    [],
+    [isApiKey],
     []
   )
 
@@ -548,10 +578,12 @@ export function CueAutomationsSection({ accountId }: { accountId: string }) {
     <Section
       title="定时任务"
       count={tasks.length || undefined}
-      action={<RefreshButton loading={loading} onClick={() => void refresh()} />}
+      action={!isApiKey ? <RefreshButton loading={loading} onClick={() => void refresh()} /> : undefined}
     >
       {error && <p className="mb-2 text-[12px] text-status-error">{error}</p>}
-      {tasks.length === 0 ? (
+      {isApiKey ? (
+        <EmptyLine>Manus API Key 模式暂不支持定时任务列表，使用 Cue 账号网页登录后可查看</EmptyLine>
+      ) : tasks.length === 0 ? (
         <EmptyLine>暂无定时任务</EmptyLine>
       ) : (
         <ul className="flex flex-col gap-1.5">
@@ -576,11 +608,14 @@ export function CueAutomationsSection({ accountId }: { accountId: string }) {
  * 5. Agent Skills (parity with `GrokMemoriesAndSkillsSection`).
  */
 export function CueSkillsSection({ accountId }: { accountId: string }) {
+  const authKind = useCueAuthKind(accountId)
+  const isApiKey = authKind === 'api-key'
   const { data: skills, loading, error, refresh } = useCueSectionLoader<
     Array<{ id: string; name: string; scope: string; description?: string }>
   >(
     accountId,
     async () => {
+      if (isApiKey) return []
       const raw = await callCueEndpoint(accountId, '/skill.v1.SkillService/ListSkills', {})
       const obj = asObj(raw)
       const userList = Array.isArray(obj?.['userAddedSkills'] ?? obj?.['user_added_skills'])
@@ -616,7 +651,7 @@ export function CueSkillsSection({ accountId }: { accountId: string }) {
         return true
       })
     },
-    [],
+    [isApiKey],
     []
   )
 
@@ -624,10 +659,12 @@ export function CueSkillsSection({ accountId }: { accountId: string }) {
     <Section
       title="记忆与技能"
       count={skills.length || undefined}
-      action={<RefreshButton loading={loading} onClick={() => void refresh()} />}
+      action={!isApiKey ? <RefreshButton loading={loading} onClick={() => void refresh()} /> : undefined}
     >
       {error && <p className="mb-2 text-[12px] text-status-error">{error}</p>}
-      {skills.length === 0 ? (
+      {isApiKey ? (
+        <EmptyLine>Manus API Key 模式暂不支持技能列表，使用 Cue 账号网页登录后可查看</EmptyLine>
+      ) : skills.length === 0 ? (
         <EmptyLine>暂无已配置技能</EmptyLine>
       ) : (
         <ul className="flex flex-col gap-1">
@@ -660,11 +697,14 @@ export function CueFilesSection({
   accountId: string
   sessionId?: string
 }) {
+  const authKind = useCueAuthKind(accountId)
+  const isApiKey = authKind === 'api-key'
   const { data: files, loading, error, refresh } = useCueSectionLoader<
     Array<{ id: string; name: string; sizeBytes: number; url?: string }>
   >(
     accountId,
     async () => {
+      if (isApiKey) return []
       const payload = sessionId
         ? { sessionUid: sessionId, limit: 50, offset: 0 }
         : { shared: false, limit: 50, offset: 0 }
@@ -697,7 +737,7 @@ export function CueFilesSection({
           (x): x is { id: string; name: string; sizeBytes: number; url?: string } => Boolean(x)
         )
     },
-    [sessionId],
+    [sessionId, isApiKey],
     []
   )
 
@@ -705,10 +745,12 @@ export function CueFilesSection({
     <Section
       title="会话文件与资料库"
       count={files.length || undefined}
-      action={<RefreshButton loading={loading} onClick={() => void refresh()} />}
+      action={!isApiKey ? <RefreshButton loading={loading} onClick={() => void refresh()} /> : undefined}
     >
       {error && <p className="mb-2 text-[12px] text-status-error">{error}</p>}
-      {files.length === 0 ? (
+      {isApiKey ? (
+        <EmptyLine>Manus API Key 模式暂不支持会话资料库，使用 Cue 账号网页登录后可浏览</EmptyLine>
+      ) : files.length === 0 ? (
         <EmptyLine>暂无会话文件</EmptyLine>
       ) : (
         <ul className="flex flex-col gap-1">
@@ -755,6 +797,8 @@ export function CueComputerSection({
   agentId?: string
   sessionId?: string
 }) {
+  const authKind = useCueAuthKind(accountId)
+  const isApiKey = authKind === 'api-key'
   const { data: runtime, loading, error, refresh } = useCueSectionLoader<{
     pcId?: string
     sessionUid?: string
@@ -765,6 +809,9 @@ export function CueComputerSection({
     async () => {
       const cue = getBridge()?.cue
       if (!cue?.rpc) return {}
+      if (isApiKey) {
+        return { sessionUid: sessionId, sandboxStatus: 'API KEY' }
+      }
       const [agentsRes, sessRaw] = await Promise.all([
         readCueRpc({ accountId, op: 'listAgents' }).catch(() => null),
         sessionId
@@ -790,42 +837,46 @@ export function CueComputerSection({
         sandboxId
       }
     },
-    [agentId, sessionId],
+    [agentId, sessionId, isApiKey],
     {}
   )
 
   return (
     <Section
       title="云电脑与沙盒"
-      action={<RefreshButton loading={loading} onClick={() => void refresh()} />}
+      action={!isApiKey ? <RefreshButton loading={loading} onClick={() => void refresh()} /> : undefined}
     >
       {error && <p className="mb-2 text-[12px] text-status-error">{error}</p>}
-      <div className="flex flex-col gap-1.5 text-[12px] text-ink-secondary">
-        <div className="flex items-center justify-between gap-2">
-          <span className="flex items-center gap-1.5">
-            <Cpu className="size-3.5 text-ink-muted" />
-            运行环境状态
-          </span>
-          <span className="font-mono text-[11.5px] text-ink">
-            {runtime.sandboxStatus || 'STANDBY'}
-          </span>
+      {isApiKey ? (
+        <EmptyLine>Manus API Key 模式暂不支持云电脑状态查询，使用 Cue 账号网页登录后可查看</EmptyLine>
+      ) : (
+        <div className="flex flex-col gap-1.5 text-[12px] text-ink-secondary">
+          <div className="flex items-center justify-between gap-2">
+            <span className="flex items-center gap-1.5">
+              <Cpu className="size-3.5 text-ink-muted" />
+              运行环境状态
+            </span>
+            <span className="font-mono text-[11.5px] text-ink">
+              {runtime.sandboxStatus || 'STANDBY'}
+            </span>
+          </div>
+          {runtime.pcId && (
+            <p className="break-all">
+              绑定云电脑：<span className="font-mono text-[11px] text-ink">{runtime.pcId}</span>
+            </p>
+          )}
+          {runtime.sandboxId && runtime.sandboxId !== runtime.pcId && (
+            <p className="break-all">
+              沙盒实例：<span className="font-mono text-[11px] text-ink">{runtime.sandboxId}</span>
+            </p>
+          )}
+          {runtime.sessionUid && (
+            <p className="break-all">
+              关联会话：<span className="font-mono text-[11px] text-ink">{runtime.sessionUid}</span>
+            </p>
+          )}
         </div>
-        {runtime.pcId && (
-          <p className="break-all">
-            绑定云电脑：<span className="font-mono text-[11px] text-ink">{runtime.pcId}</span>
-          </p>
-        )}
-        {runtime.sandboxId && runtime.sandboxId !== runtime.pcId && (
-          <p className="break-all">
-            沙盒实例：<span className="font-mono text-[11px] text-ink">{runtime.sandboxId}</span>
-          </p>
-        )}
-        {runtime.sessionUid && (
-          <p className="break-all">
-            关联会话：<span className="font-mono text-[11px] text-ink">{runtime.sessionUid}</span>
-          </p>
-        )}
-      </div>
+      )}
     </Section>
   )
 }
@@ -834,11 +885,14 @@ export function CueComputerSection({
  * 8. Cue Connectors & Integrations (parity with `GrokConnectorsAndMcpSection`).
  */
 export function CueConnectorsSection({ accountId }: { accountId: string }) {
+  const authKind = useCueAuthKind(accountId)
+  const isApiKey = authKind === 'api-key'
   const { data: connectors, loading, error, refresh } = useCueSectionLoader<
     Array<{ id: string; name: string; connected: boolean }>
   >(
     accountId,
     async () => {
+      if (isApiKey) return []
       const raw = await callCueEndpoint(accountId, '/connectors.v1.ConnectorService/ListConnectors', {})
       const obj = asObj(raw)
       const list = Array.isArray(obj?.['connectors'] ?? obj?.['items'])
@@ -855,7 +909,7 @@ export function CueConnectorsSection({ accountId }: { accountId: string }) {
         })
         .filter((x): x is { id: string; name: string; connected: boolean } => Boolean(x))
     },
-    [],
+    [isApiKey],
     []
   )
 
@@ -863,10 +917,12 @@ export function CueConnectorsSection({ accountId }: { accountId: string }) {
     <Section
       title="连接器与集成"
       count={connectors.length || undefined}
-      action={<RefreshButton loading={loading} onClick={() => void refresh()} />}
+      action={!isApiKey ? <RefreshButton loading={loading} onClick={() => void refresh()} /> : undefined}
     >
       {error && <p className="mb-2 text-[12px] text-status-error">{error}</p>}
-      {connectors.length === 0 ? (
+      {isApiKey ? (
+        <EmptyLine>Manus API Key 模式暂不支持连接器列表，使用 Cue 账号网页登录后可查看</EmptyLine>
+      ) : connectors.length === 0 ? (
         <EmptyLine>暂无已配置连接器</EmptyLine>
       ) : (
         <ul className="flex flex-col gap-1">
@@ -1019,6 +1075,8 @@ export function CueAgentContactsSection({
   sessionId?: string
 }) {
   const [copiedKey, setCopiedKey] = useState<string>()
+  const authKind = useCueAuthKind(accountId)
+  const isApiKey = authKind === 'api-key'
 
   const { data: detail, loading, refresh } = useCueSectionLoader<{
     agent?: CueAgentMeta | null
@@ -1030,7 +1088,7 @@ export function CueAgentContactsSection({
       if (!cue?.rpc) return { collaborators: [] }
       const [agentsRes, sessRaw] = await Promise.all([
         readCueRpc({ accountId, op: 'listAgents' }).catch(() => null),
-        sessionId
+        sessionId && !isApiKey
           ? callCueEndpoint(accountId, '/session.v1.SessionService/GetSession', {
               sessionUid: sessionId,
               includeEmptyTasks: true
@@ -1054,7 +1112,7 @@ export function CueAgentContactsSection({
         .filter((x): x is { id: string; label: string } => Boolean(x))
       return { agent: meta, collaborators }
     },
-    [agentId, sessionId],
+    [agentId, sessionId, isApiKey],
     { collaborators: [] }
   )
 

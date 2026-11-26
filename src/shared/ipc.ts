@@ -1427,10 +1427,35 @@ export interface CueOpenLoginRequest {
 export interface CueImportCredentialsRequest {
   accountId: string
   verifyApiKey?: boolean
+  skipVerify?: boolean
   credential?: string
   rawInput?: string
   accessToken?: string
   refreshToken?: string
+}
+
+export interface CueAttachmentPayload {
+  id?: string
+  name: string
+  mimeType: string
+  size?: number
+  dataBase64: string
+}
+
+export interface CueToolCallPayload {
+  id: string
+  name: string
+  toolType?: string
+  status: 'running' | 'completed' | 'errored'
+  summary?: string
+}
+
+export interface CueMediaPayload {
+  kind: 'image' | 'file'
+  path: string
+  name?: string
+  imageId?: string
+  mimeType?: string
 }
 
 export interface CueAuthStatus {
@@ -1474,6 +1499,22 @@ export type CueRpcRequest =
       sessionId?: string
       conversationId?: string
       text: string
+      attachments?: CueAttachmentPayload[]
+      baseUrl?: string
+    }
+  | {
+      accountId: string
+      op: 'stopRun'
+      agentId?: string
+      sessionId?: string
+      requestId?: string
+      baseUrl?: string
+    }
+  | {
+      accountId: string
+      op: 'downloadMedia'
+      url: string
+      name?: string
       baseUrl?: string
     }
   | {
@@ -1540,6 +1581,8 @@ export type CueMainEvent =
       messageId: string
       text: string
       done: boolean
+      tools?: CueToolCallPayload[]
+      media?: CueMediaPayload[]
     }
   | {
       type: 'turn_failed'

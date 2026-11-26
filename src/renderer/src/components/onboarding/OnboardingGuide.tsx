@@ -47,6 +47,7 @@ interface PlatformGuideItem {
     | 'dot-accounts'
     | 'hermes-accounts'
     | 'antigravity-accounts'
+    | 'cue-accounts'
     | 'ds-bot-accounts'
   accountRule: string
   importMethods: string
@@ -151,6 +152,21 @@ const PLATFORM_GUIDE_ITEMS: PlatformGuideItem[] = [
     grokState: 'streaming'
   },
   {
+    id: 'cue',
+    title: 'Cue',
+    settingsTab: 'cue-accounts',
+    accountRule: '1 个 Cue 账号自动展开全部个人与自定义 Agent，支持原生桌面协议与 Manus API Key 双模式',
+    importMethods: '支持内置隔离窗口登录、系统浏览器一键回传授权，或粘贴 Cookie / Token / Manus API Key',
+    workbenchCards: [
+      { title: '实时流式对话与工具进度', summary: '直连 Cue 原生 WebSocket 流式收发，支持中途停止、图片附件与后台新消息实时推送' },
+      { title: '历史会话、定时任务与技能', summary: '全量拉取历史对话记录，查看周期定时任务与已配置的 Agent 技能' },
+      { title: '会话文件、云电脑与内置网页', summary: '浏览文件库、沙盒电脑与连接器，随时一键切换内置隔离网页查看云电脑画面' }
+    ],
+    shape: 'sparkle',
+    color: 'violet',
+    grokState: 'working'
+  },
+  {
     id: 'ds-bot',
     title: 'DS Bot',
     settingsTab: 'ds-bot-accounts',
@@ -228,6 +244,7 @@ function FullScreenGuideBody({
       | 'dot-accounts'
       | 'hermes-accounts'
       | 'antigravity-accounts'
+      | 'cue-accounts'
       | 'ds-bot-accounts'
   ) => {
     markOnboardingSeen()

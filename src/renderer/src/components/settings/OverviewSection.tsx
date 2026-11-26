@@ -31,7 +31,7 @@ const PLATFORMS = [
   { id: 'hark', tab: 'hark-accounts', desc: '项目空间' },
   { id: 'hermes', tab: 'hermes-accounts', desc: '本地网关' },
   { id: 'antigravity', tab: 'antigravity-accounts', desc: 'Google Cloud' },
-  { id: 'cue', tab: 'cue-accounts', desc: 'Manus API' },
+  { id: 'cue', tab: 'cue-accounts', desc: 'Cue 原生 / API' },
   { id: 'ds-bot', tab: 'ds-bot-accounts', desc: 'DSH 开源团队' }
 ] as const
 

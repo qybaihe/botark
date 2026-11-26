@@ -483,6 +483,18 @@ describe('Area 2: Cue Multi-Account Management (grokbot Blueprint)', () => {
     expect(st.displayName).toBe('Web Cue')
     expect(st.authKind).toBe('session')
 
+    // Intercept Connect-RPC ListAgents locally so the E2E test stays deterministic & offline.
+    const origFetch = globalThis.fetch
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      if (url.includes('/agents.v1.AgentsService/ListAgents')) {
+        return Response.json({
+          agents: [{ id: 'ag_web_1', name: 'Web Cue', sessionUid: 'sess_web_1' }]
+        })
+      }
+      return origFetch(input, init)
+    })
+
     const health = (await electronHarness.invokeIpc(CUE_CHANNELS.rpc, {
       accountId: 'acc_cue_web_1',
       op: 'health'
@@ -496,5 +508,6 @@ describe('Area 2: Cue Multi-Account Management (grokbot Blueprint)', () => {
     expect(agents.ok).toBe(true)
     expect(Array.isArray(agents.data)).toBe(true)
     expect(agents.data.length).toBeGreaterThanOrEqual(1)
+    ;(cue.watchMod.stopCueAccountWatch as ((id: string) => void) | undefined)?.('acc_cue_web_1')
   })
 })

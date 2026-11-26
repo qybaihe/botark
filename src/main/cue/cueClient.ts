@@ -15,10 +15,21 @@ import {
   CUE_CONNECT_BASE,
   cueFetcherForAccount,
   forceRefreshCueAuth,
-  loadCueTokens
+  loadCueTokens,
+  tryRecaptureCueSessionCookie,
+  type CueStoredTokens
 } from './cueAuth'
 import type { CueMainAuth } from './cueAuthStore'
 import { getOrCreateCueDeviceId } from './cueDeviceId'
+import {
+  CUE_CLIENT_VERSION,
+  extractCueEventMedia,
+  mapCueToolEvent,
+  type CueMediaPart,
+  type CueToolCall
+} from './cueEventParsers'
+
+export { CUE_CLIENT_VERSION, extractCueEventMedia, mapCueToolEvent, type CueMediaPart, type CueToolCall }
 
 export interface CueAgentSummary {
   id: string
@@ -41,6 +52,8 @@ export interface CueHistoryMessage {
   role: 'user' | 'bot'
   text: string
   createdAtMs: number
+  tools?: CueToolCall[]
+  media?: CueMediaPart[]
 }
 
 export interface CueQuotaView {
@@ -208,7 +221,7 @@ export function buildCueClientHeaders(auth: CueMainAuth): Record<string, string>
     Accept: 'application/json',
     'Connect-Protocol-Version': '1',
     'x-client-type': 'desktop',
-    'x-client-version': '1.0.6',
+    'x-client-version': CUE_CLIENT_VERSION,
     'x-client-id': deviceId,
     'x-product-name': 'manus-agents'
   }
@@ -283,6 +296,12 @@ export async function callCueApi(
     } catch (error) {
       if (currentCueAuthForIdentity(auth) !== undefined) throw error
     }
+  } else if (
+    !opts.fetchImpl &&
+    auth.authKind === 'session' &&
+    typeof tryRecaptureCueSessionCookie === 'function'
+  ) {
+    await tryRecaptureCueSessionCookie(auth).catch(() => null)
   }
   const current = currentCueAuthForIdentity(auth)
   if (current && current !== auth) {
@@ -293,6 +312,118 @@ export async function callCueApi(
     }
   }
   return result
+}
+
+const CUE_MEDIA_ALLOWED_HOST =
+  /^(?:[a-z0-9-]+\.)*(?:cue\.im|manus\.im|manus\.ai|manuscdn\.com|amazonaws\.com|cloudfront\.net|r2\.cloudflarestorage\.com|storage\.googleapis\.com)$/i
+const CUE_CREDENTIAL_HOST = /^(?:[a-z0-9-]+\.)*(?:cue\.im|manus\.im|manus\.ai)$/i
+const MAX_CUE_MEDIA_BYTES = 25 * 1024 * 1024
+
+/**
+ * Live-probe imported Cue Cookie / Bearer JWT credentials against `AgentsService/ListAgents`
+ * before committing them to the encrypted vault.
+ */
+export async function verifyCueNativeCredentials(
+  accountId: string,
+  tokens: CueStoredTokens,
+  opts?: { baseUrl?: string; fetchImpl?: typeof fetch }
+): Promise<{ ok: boolean; status: number; message?: string }> {
+  const probeAuth: CueMainAuth = {
+    accountId,
+    accessToken: tokens.accessToken,
+    refreshToken: tokens.refreshToken,
+    apiKey: tokens.apiKey,
+    cookieHeader: tokens.cookieHeader,
+    cookieNames: tokens.cookieNames,
+    accountSlot: tokens.accountSlot || tokens.handle,
+    handle: tokens.handle || tokens.accountSlot,
+    displayName: tokens.displayName || tokens.handle || 'Cue',
+    baseUrl: tokens.baseUrl,
+    deviceId: getOrCreateCueDeviceId(accountId),
+    authKind: tokens.authKind,
+    expiresAtMs: tokens.expiresAtMs,
+    accountFingerprint: 'probe'
+  }
+  const res = await executeCueHttpOnce(probeAuth, '/agents.v1.AgentsService/ListAgents', {
+    method: 'POST',
+    body: { limit: 1 },
+    baseUrl: opts?.baseUrl,
+    fetchImpl: opts?.fetchImpl
+  })
+  if (res.ok) return { ok: true, status: res.status }
+  if (res.status === 401 || res.status === 403) {
+    return {
+      ok: false,
+      status: res.status,
+      message: 'Cue Cookie / Token 无效或已过期，请重新登录或重新复制凭据'
+    }
+  }
+  const rec = asRecord(res.data)
+  const detail = nonEmptyString(rec?.['message'] ?? rec?.['error'])
+  return {
+    ok: false,
+    status: res.status,
+    message: detail || `验证 Cue 凭据失败（HTTP ${res.status}）`
+  }
+}
+
+/**
+ * Download an image/file URL emitted by Cue through the account's isolated proxy,
+ * attaching Cue auth headers only for first-party Manus/Cue hosts.
+ */
+export async function downloadCueMedia(
+  accountId: string,
+  rawUrl: string,
+  opts?: { name?: string; fetchImpl?: typeof fetch }
+): Promise<{ ok: true; data: { dataBase64: string; mimeType: string; filename?: string } } | { ok: false; status: number; message: string }> {
+  let parsed: URL
+  try {
+    parsed = new URL(rawUrl.trim())
+  } catch {
+    return { ok: false, status: 400, message: '无效的 Cue 媒体链接' }
+  }
+  if (parsed.protocol !== 'https:' && !(opts?.fetchImpl && parsed.protocol === 'http:')) {
+    return { ok: false, status: 400, message: '仅支持通过 HTTPS 下载 Cue 媒体文件' }
+  }
+  if (!opts?.fetchImpl && !CUE_MEDIA_ALLOWED_HOST.test(parsed.hostname)) {
+    return { ok: false, status: 403, message: '拒绝代理非 Cue / Manus 域名的媒体链接' }
+  }
+  const auth = await loadCueTokens(accountId)
+  const headers: Record<string, string> = { Accept: '*/*' }
+  if (auth && (opts?.fetchImpl || CUE_CREDENTIAL_HOST.test(parsed.hostname))) {
+    if (auth.accessToken) headers['Authorization'] = `Bearer ${auth.accessToken}`
+    if (auth.apiKey) headers['x-manus-api-key'] = auth.apiKey
+    if (auth.cookieHeader) headers['Cookie'] = auth.cookieHeader
+    headers['x-product-name'] = 'manus-agents'
+  }
+  const fetcher = cueFetcherForAccount(accountId, opts?.fetchImpl)
+  const res = await fetcher(parsed.toString(), {
+    method: 'GET',
+    headers,
+    signal: AbortSignal.timeout(30_000)
+  })
+  if (!res.ok) {
+    return { ok: false, status: res.status, message: `下载 Cue 媒体失败（HTTP ${res.status}）` }
+  }
+  const contentLength = Number(res.headers.get('content-length') || 0)
+  if (Number.isFinite(contentLength) && contentLength > MAX_CUE_MEDIA_BYTES) {
+    return { ok: false, status: 413, message: 'Cue 媒体文件超过 25 MB 预览上限' }
+  }
+  const buf = Buffer.from(await res.arrayBuffer())
+  if (buf.byteLength > MAX_CUE_MEDIA_BYTES) {
+    return { ok: false, status: 413, message: 'Cue 媒体文件超过 25 MB 预览上限' }
+  }
+  const mimeType =
+    (res.headers.get('content-type') || '').split(';')[0]?.trim() || 'application/octet-stream'
+  const fallbackName = parsed.pathname.split('/').filter(Boolean).pop()
+  return {
+    ok: true,
+    data: {
+      dataBase64: buf.toString('base64'),
+      mimeType,
+      filename: opts?.name || fallbackName
+    }
+  }
 }
 
 function hasQuotaNumbers(q: CueQuotaView): boolean {
@@ -497,8 +628,11 @@ function collectCueHistoryIntoMap(
     }
     const rec = asRecord(node)
     if (!rec) return
-    if (rec['type'] === 'chat' || (rec['type'] === 'event' && asRecord(rec['event'])?.['type'] === 'chat')) {
-      rawItems.push(rec['type'] === 'event' ? rec['event'] : rec)
+    const innerEvent = rec['type'] === 'event' ? asRecord(rec['event']) : null
+    const candidate = innerEvent ?? rec
+    const candidateType = nonEmptyString(candidate['type'])
+    if (candidateType === 'chat' || candidateType === 'toolUsed' || candidateType === 'tool_used' || candidateType === 'tool_call') {
+      rawItems.push(candidate)
       return
     }
     for (const key of CUE_HISTORY_CONTAINER_KEYS) {
@@ -509,21 +643,37 @@ function collectCueHistoryIntoMap(
   collectEvents(raw)
 
   const occurrences = new Map<string, number>()
+  let pendingTools: CueToolCall[] = []
   for (const [index, item] of rawItems.entries()) {
     const ev = asRecord(item)
-    if (!ev || ev['type'] !== 'chat') continue
+    if (!ev) continue
+    const evType = nonEmptyString(ev['type'])
+    if (evType === 'toolUsed' || evType === 'tool_used' || evType === 'tool_call') {
+      const tool = mapCueToolEvent(ev, 'completed')
+      if (tool && !pendingTools.some((existing) => existing.id === tool.id)) {
+        pendingTools.push(tool)
+      }
+      continue
+    }
+    if (evType !== 'chat') continue
     const sender = nonEmptyString(ev['sender'])?.toLowerCase()
     if (sender !== 'user' && sender !== 'assistant') continue
-    const text = readChatText(ev)
-    if (!text) continue
+    if (sender === 'user') {
+      pendingTools = []
+    }
+    const text = readChatText(ev) ?? ''
+    const media = extractCueEventMedia(ev)
+    if (!text && media.length === 0) continue
     const timestamp = ev['timestamp'] ?? ev['createdAt'] ?? ev['created_at']
     let id = nonEmptyString(ev['id'] ?? ev['eventId'] ?? ev['event_id'] ?? ev['messageId'])
     if (!id) {
-      const material = JSON.stringify([sender, timestamp, text])
+      const material = JSON.stringify([sender, timestamp, text, media.map((m) => m.path)])
       const occurrence = (occurrences.get(material) ?? 0) + 1
       occurrences.set(material, occurrence)
       id = `cue_hist_${createHash('sha256').update(material).digest('hex').slice(0, 24)}_${occurrence}`
     }
+    const toolsForMessage = sender === 'assistant' && pendingTools.length > 0 ? pendingTools : undefined
+    if (sender === 'assistant') pendingTools = []
     if (byId.has(id)) continue
     // Older pages sort first even when the API omits timestamps.
     const createdAtMs = toEpochMs(timestamp, index - page * 1_000_000)
@@ -531,7 +681,9 @@ function collectCueHistoryIntoMap(
       id,
       role: sender === 'user' ? 'user' : 'bot',
       text,
-      createdAtMs
+      createdAtMs,
+      ...(toolsForMessage ? { tools: toolsForMessage } : {}),
+      ...(media.length > 0 ? { media } : {})
     })
   }
 }

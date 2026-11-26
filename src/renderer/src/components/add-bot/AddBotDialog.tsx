@@ -837,7 +837,8 @@ export function LoginWaiting({
     try {
       const st = await window.electron.cue.importCredentials({
         accountId,
-        credential: rawInput.trim()
+        credential: rawInput.trim(),
+        verifyApiKey: true
       })
       if (!st.signedIn) {
         setErr('未检测到有效 Cue 会话，请检查 Cookie（cue_session_id）/ Bearer Token')
@@ -1022,7 +1023,7 @@ export function LoginWaiting({
           <textarea
             value={rawInput}
             onChange={(e) => setRawInput(e.target.value)}
-            placeholder="粘贴 Cue Cookie（含 cue_session_id=...）、Bearer Token (eyJ...) 或 JSON…"
+            placeholder="粘贴 Manus API Key（sk-...）、Cue Cookie（cue_session_id=...）、Bearer Token (eyJ...) 或 JSON…"
             rows={3}
             spellCheck={false}
             className="w-full rounded-lg border border-line bg-surface p-2 font-mono text-[11.5px] text-ink outline-none"

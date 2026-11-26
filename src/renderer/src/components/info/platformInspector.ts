@@ -100,7 +100,7 @@ export const PLATFORM_INSPECTORS: Record<PlatformId, PlatformInspectorSpec> = {
     platformId: 'cue',
     displayName: 'Cue',
     protocolLabel: 'Connect-RPC + WS · Cue Native',
-    supportsWebSession: false,
+    supportsWebSession: true,
     supportsQuickNewConversation: false,
     tabs: [
       { id: 'overview', label: 'Overview' },

@@ -2730,7 +2730,7 @@ export const useBotStore = create<BotHubState>()(
       const previous = cueCredentialImports.get(accountId)
       const importing = (previous ?? Promise.resolve()).catch(() => undefined).then(() => {
         if (!isCurrent()) throw new Error('Cue account changed while importing credentials')
-        return cue.importCredentials({ accountId, credential })
+        return cue.importCredentials({ accountId, credential, verifyApiKey: true })
       })
       cueCredentialImports.set(accountId, importing)
       const st = await importing.finally(() => {

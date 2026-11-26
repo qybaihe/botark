@@ -8,12 +8,18 @@ export function getEventBot(
   sessionId?: string
 ): Bot | undefined {
   if (conversationId?.startsWith('room-turn-')) return
-  const matches = (bot: Bot) => bot.activeAccountId === accountId &&
+  const matches = (bot: Bot) =>
+    bot.activeAccountId === accountId &&
     (!sessionId || !bot.activeSessionId || bot.activeSessionId === sessionId)
   // Adapters use accountId only when there is no explicit bot ID.
-  return conversationId && conversationId !== accountId
-    ? bots.find((bot) => bot.id === conversationId && matches(bot))
-    : bots.find(matches)
+  if (conversationId && conversationId !== accountId) {
+    return bots.find((bot) => bot.id === conversationId && matches(bot))
+  }
+  if (sessionId) {
+    const exact = bots.find((bot) => bot.activeAccountId === accountId && bot.activeSessionId === sessionId)
+    if (exact) return exact
+  }
+  return bots.find(matches)
 }
 
 export function belongsToSelectedSession(event: AdapterEvent, bots: Bot[]): boolean {

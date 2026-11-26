@@ -33,11 +33,13 @@ vi.mock('./cueWatchManager', () => ({
 
 import {
   buildCueSocketUrl,
+  cancelCueNativeTurn,
   createCueEventId,
   encodeSocketIoEvent,
   parseSocketIoPacket,
   sendCueNativeMessage,
-  stopCueChatSocket
+  stopCueChatSocket,
+  syncCueWatchedSessions
 } from './cueChatSocket'
 
 describe('Cue native Engine.IO / Socket.IO chat client', () => {
@@ -409,5 +411,216 @@ describe('Cue native Engine.IO / Socket.IO chat client', () => {
         text: '收到新消息 11'
       }
     })
+  })
+
+  it('cancels an active turn immediately without closing the shared WebSocket', async () => {
+    const wss = new WebSocketServer({ port: 0 })
+    servers.push(wss)
+    const port = (wss.address() as AddressInfo).port
+    const connections = vi.fn()
+    let turnCount = 0
+
+    wss.on('connection', (ws) => {
+      connections()
+      ws.send('0{"sid":"eio_cancel"}')
+      ws.on('message', (data) => {
+        const packet = parseSocketIoPacket(data.toString())
+        if (packet.kind === 'connect') {
+          ws.send('40{"sid":"sio_cancel"}')
+          return
+        }
+        if (packet.kind !== 'event') return
+        const payload = packet.payload as { type: string; sessionId: string; content: string }
+        if (payload.type !== 'user_message') return
+        turnCount += 1
+        ws.send(
+          encodeSocketIoEvent('message', {
+            type: 'event',
+            sessionId: payload.sessionId,
+            event: { type: 'statusUpdate', agentStatus: 'running' }
+          })
+        )
+        if (turnCount === 2) {
+          ws.send(
+            encodeSocketIoEvent('message', {
+              type: 'event',
+              sessionId: payload.sessionId,
+              event: { type: 'chat', sender: 'assistant', id: 'after_cancel', content: '第二次回复' }
+            })
+          )
+          ws.send(
+            encodeSocketIoEvent('message', {
+              type: 'event',
+              sessionId: payload.sessionId,
+              event: { type: 'statusUpdate', agentStatus: 'stopped' }
+            })
+          )
+        }
+      })
+    })
+
+    const first = sendCueNativeMessage({
+      accountId: 'acc_cancel',
+      sessionId: 'sess_cancel',
+      requestId: 'req_cancel_1',
+      text: '长任务',
+      wsBaseUrl: `http://127.0.0.1:${port}`,
+      timeoutMs: 10_000
+    })
+
+    await vi.waitFor(() => expect(turnCount).toBe(1))
+    const cancelled = cancelCueNativeTurn({ accountId: 'acc_cancel', sessionId: 'sess_cancel' })
+    expect(cancelled).toEqual({ cancelledCount: 1, sessionIds: ['sess_cancel'] })
+    await expect(first).rejects.toMatchObject({ code: 'cancelled', message: 'Cue 运行已停止' })
+
+    const second = await sendCueNativeMessage({
+      accountId: 'acc_cancel',
+      sessionId: 'sess_cancel',
+      text: '继续',
+      wsBaseUrl: `http://127.0.0.1:${port}`,
+      timeoutMs: 5_000
+    })
+    expect(second.reply?.text).toBe('第二次回复')
+    expect(connections).toHaveBeenCalledOnce()
+  })
+
+  it('refreshes inactivity timeout during active tool execution, captures tools/media, and forwards uploaded attachments', async () => {
+    const wss = new WebSocketServer({ port: 0 })
+    servers.push(wss)
+    const port = (wss.address() as AddressInfo).port
+    let receivedAttachments: unknown
+
+    wss.on('connection', (ws) => {
+      ws.send('0{"sid":"eio_tools"}')
+      ws.on('message', (data) => {
+        const packet = parseSocketIoPacket(data.toString())
+        if (packet.kind === 'connect') {
+          ws.send('40{"sid":"sio_tools"}')
+          return
+        }
+        if (packet.kind !== 'event') return
+        const payload = packet.payload as { type: string; sessionId: string; attachments?: unknown }
+        if (payload.type !== 'user_message') return
+        receivedAttachments = payload.attachments
+        const emit = (event: object) =>
+          ws.send(encodeSocketIoEvent('message', { type: 'event', sessionId: payload.sessionId, event }))
+        emit({ type: 'statusUpdate', agentStatus: 'running' })
+        setTimeout(() => emit({ type: 'toolUsed', id: 't1', tool: 'browser', title: '搜索文档', status: 'running' }), 40)
+        setTimeout(() => emit({ type: 'liveStatus', title: '整理图表' }), 85)
+        setTimeout(() => {
+          emit({
+            type: 'chat',
+            sender: 'assistant',
+            id: 'reply_rich',
+            content: '分析完成',
+            attachments: [{ id: 'img1', url: 'https://files.manuscdn.com/out.png', filename: 'out.png', mimeType: 'image/png' }]
+          })
+          emit({ type: 'statusUpdate', agentStatus: 'stopped' })
+        }, 135)
+      })
+    })
+
+    const uploadAttachment = vi.fn(async (att) => ({
+      file_id: 'file_up_1',
+      filename: att.name,
+      mime_type: att.mimeType,
+      size: 4
+    }))
+
+    const result = await sendCueNativeMessage({
+      accountId: 'acc_tools',
+      sessionId: 'sess_tools',
+      text: '帮我分析这张图',
+      attachments: [
+        { name: 'input.png', mimeType: 'image/png', dataBase64: Buffer.from('test').toString('base64') }
+      ],
+      uploadAttachment,
+      wsBaseUrl: `http://127.0.0.1:${port}`,
+      timeoutMs: 90,
+      maxTurnMs: 2_000
+    })
+
+    expect(uploadAttachment).toHaveBeenCalledOnce()
+    expect(receivedAttachments).toEqual([
+      expect.objectContaining({ file_id: 'file_up_1', filename: 'input.png', mime_type: 'image/png' })
+    ])
+    expect(result.reply).toEqual({
+      id: 'reply_rich',
+      text: '分析完成',
+      tools: [{ id: 't1', name: 'browser', toolType: 'browser', status: 'completed', summary: '搜索文档' }],
+      media: [{ kind: 'image', path: 'https://files.manuscdn.com/out.png', name: 'out.png', mimeType: 'image/png', imageId: 'img1' }]
+    })
+  })
+
+  it('delivers unsolicited background pushes for watched sessions while ignoring historical replays', async () => {
+    const wss = new WebSocketServer({ port: 0 })
+    servers.push(wss)
+    const port = (wss.address() as AddressInfo).port
+    let serverSocket: import('ws').WebSocket | undefined
+
+    wss.on('connection', (ws) => {
+      serverSocket = ws
+      ws.send('0{"sid":"eio_watch"}')
+      ws.on('message', (data) => {
+        const packet = parseSocketIoPacket(data.toString())
+        if (packet.kind === 'connect') {
+          ws.send('40{"sid":"sio_watch"}')
+          return
+        }
+        if (packet.kind === 'event') {
+          const payload = packet.payload as { type: string; sessionId: string }
+          if (payload.type === 'join_session') {
+            ws.send(
+              encodeSocketIoEvent('message', {
+                type: 'event',
+                sessionId: payload.sessionId,
+                event: {
+                  type: 'chat',
+                  sender: 'assistant',
+                  id: 'old_replay',
+                  content: '旧记录',
+                  timestamp: Date.now() - 120_000
+                }
+              })
+            )
+          }
+        }
+      })
+    })
+
+    await syncCueWatchedSessions(
+      'acc_watch',
+      [{ sessionId: 'sess_bg', agentId: 'ag_bg' }],
+      { wsBaseUrl: `http://127.0.0.1:${port}` }
+    )
+
+    serverSocket!.send(
+      encodeSocketIoEvent('message', {
+        type: 'event',
+        sessionId: 'sess_bg',
+        event: {
+          type: 'chat',
+          sender: 'assistant',
+          id: 'bg_push_1',
+          content: '定时早报已生成',
+          timestamp: Date.now()
+        }
+      })
+    )
+
+    await vi.waitFor(() =>
+      expect(watchEvents).toContainEqual(
+        expect.objectContaining({
+          type: 'stream',
+          accountId: 'acc_watch',
+          sessionId: 'sess_bg',
+          agentId: 'ag_bg',
+          messageId: 'bg_push_1',
+          text: '定时早报已生成',
+          done: true
+        })
+      )
+    )
+    expect(watchEvents.some((ev) => (ev as { messageId?: string }).messageId === 'old_replay')).toBe(false)
   })
 })

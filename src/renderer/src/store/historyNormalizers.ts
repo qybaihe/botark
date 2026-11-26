@@ -191,7 +191,11 @@ export function cueHistory(data: unknown, botId: string, accountId: string, agen
     const text = trimStr(row.text)
     const role = row.role
     const createdAt = typeof row.createdAtMs === 'number' ? row.createdAtMs : Date.now()
-    if (!id || !text || (role !== 'user' && role !== 'bot')) continue
+    const rawTools = Array.isArray(row.tools) ? (row.tools as ChatMessage['tools']) : undefined
+    const rawMedia = Array.isArray(row.media) ? (row.media as ChatMessage['media']) : undefined
+    const tools = rawTools && rawTools.length > 0 ? rawTools : undefined
+    const media = rawMedia && rawMedia.length > 0 ? rawMedia : undefined
+    if (!id || (!text && !media) || (role !== 'user' && role !== 'bot')) continue
     messages.push({
       id,
       botId,
@@ -200,7 +204,9 @@ export function cueHistory(data: unknown, botId: string, accountId: string, agen
       role,
       text,
       createdAt,
-      ...(role === 'user' ? { delivery: 'sent' as const } : {})
+      ...(role === 'user' ? { delivery: 'sent' as const } : {}),
+      ...(tools ? { tools } : {}),
+      ...(media ? { media } : {})
     })
   }
   return messages
