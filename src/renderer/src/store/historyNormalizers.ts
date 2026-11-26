@@ -99,6 +99,42 @@ export function hermesHistory(data: unknown, botId: string, accountId: string): 
   if (Array.isArray(data)) return assistantHistory(data as AssistantHistoryRow[], botId, accountId, true)
 }
 
+export function dsBotHistory(
+  data: unknown,
+  botId: string,
+  accountId: string,
+  agentId?: string
+): ChatMessage[] | undefined {
+  if (!Array.isArray(data)) return undefined
+  const out: ChatMessage[] = []
+  for (const item of data) {
+    const row = asObj(item)
+    if (!row) continue
+    const id = typeof row.id === 'string' && row.id ? row.id : ''
+    const role = row.role === 'user' ? 'user' : 'bot'
+    const senderName = typeof row.senderName === 'string' && row.senderName.trim() ? row.senderName.trim() : ''
+    const rawText = typeof row.text === 'string' ? row.text : ''
+    const text =
+      role === 'bot' && senderName && agentId?.startsWith('room:')
+        ? `**${senderName}**：${rawText}`
+        : rawText
+    if (!id || (!text.trim() && !Array.isArray(row.media) && !Array.isArray(row.tools))) continue
+    out.push({
+      id,
+      botId,
+      accountId,
+      ...(agentId ? { agentId } : {}),
+      role,
+      text,
+      createdAt: typeof row.createdAt === 'number' && Number.isFinite(row.createdAt) ? row.createdAt : Date.now(),
+      delivery: role === 'user' ? 'sent' : undefined,
+      ...(Array.isArray(row.tools) && row.tools.length > 0 ? { tools: row.tools as ChatMessage['tools'] } : {}),
+      ...(Array.isArray(row.media) && row.media.length > 0 ? { media: row.media as ChatMessage['media'] } : {})
+    })
+  }
+  return out
+}
+
 export function antigravityHistory(data: unknown, botId: string, accountId: string): ChatMessage[] | undefined {
   const rows = asObj(data)?.messages
   if (Array.isArray(rows)) return assistantHistory(rows as AssistantHistoryRow[], botId, accountId, false)

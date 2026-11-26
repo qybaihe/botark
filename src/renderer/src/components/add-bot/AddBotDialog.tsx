@@ -5,6 +5,7 @@ import type { PlatformId } from '@adapters/types'
 import { createId } from '@shared/id'
 import { Camera, ChevronLeft, ChevronRight, ExternalLink, ListPlus, Plus, RefreshCw } from 'lucide-react'
 import { MuseBatchImport } from './MuseBatchImport'
+import { DsBotConnectForm } from '@/components/dsbot/DsBotConnectForm'
 import { ArkRelayOrbSvg } from '@/components/ui/ArkGlyphs'
 import { BotAvatar } from '@/components/ui/Avatar'
 import { Button } from '@/components/ui/Button'
@@ -52,6 +53,7 @@ function AddBotFlow({ open, wizardId }: { open: boolean; wizardId: number }) {
   const bots = useBotStore((s) => s.bots)
   const accounts = useBotStore((s) => s.accounts)
   const syncGrokAccountBots = useBotStore((s) => s.syncGrokAccountBots)
+  const syncDsBotAccountBots = useBotStore((s) => s.syncDsBotAccountBots)
   const selectBot = useBotStore((s) => s.selectBot)
   const initialPlatform = useBotStore((s) => s.addBotInitialPlatform)
   const botId = useRef(createId('bot')).current
@@ -67,6 +69,7 @@ function AddBotFlow({ open, wizardId }: { open: boolean; wizardId: number }) {
   const [grokSyncError, setGrokSyncError] = useState<string>()
   const [hermesConnectOpen, setHermesConnectOpen] = useState(false)
   const [hermesReady, setHermesReady] = useState<{ handle: string; displayName: string } | null>(null)
+  const [dsBotConnectOpen, setDsBotConnectOpen] = useState(false)
   const { phase } = login
   const t = useT()
   const locale = usePrefsStore((s) => s.locale)
@@ -109,6 +112,9 @@ function AddBotFlow({ open, wizardId }: { open: boolean; wizardId: number }) {
     } else if (initialPlatform === 'cue') {
       autoStartedRef.current = true
       login.start('cue')
+    } else if (initialPlatform === 'ds-bot') {
+      autoStartedRef.current = true
+      setDsBotConnectOpen(true)
     }
   }, [open, initialPlatform, isCurrentWizard, liveGrokAccounts.length])
 
@@ -158,6 +164,10 @@ function AddBotFlow({ open, wizardId }: { open: boolean; wizardId: number }) {
     }
     if (platformId === 'hermes') {
       setHermesConnectOpen(true)
+      return
+    }
+    if (platformId === 'ds-bot') {
+      setDsBotConnectOpen(true)
       return
     }
     login.start(platformId)
@@ -211,7 +221,9 @@ function AddBotFlow({ open, wizardId }: { open: boolean; wizardId: number }) {
       ? t('Set up your bot')
       : hermesConnectOpen && phase.kind === 'idle'
         ? t('Connect Hermes')
-        : grokAccountChoiceOpen && phase.kind === 'idle'
+        : dsBotConnectOpen && phase.kind === 'idle'
+          ? t('Connect DS Bot')
+          : grokAccountChoiceOpen && phase.kind === 'idle'
           ? '添加 Grok Bot'
           : phase.kind === 'idle'
             ? t('New bot')
@@ -244,6 +256,18 @@ function AddBotFlow({ open, wizardId }: { open: boolean; wizardId: number }) {
             onClick={() => {
               login.discard()
               setHermesConnectOpen(false)
+            }}
+            className="-ml-1"
+          >
+            <ChevronLeft />
+          </IconButton>
+        ) : dsBotConnectOpen && phase.kind === 'idle' ? (
+          <IconButton
+            label={t('Back')}
+            size="sm"
+            onClick={() => {
+              login.discard()
+              setDsBotConnectOpen(false)
             }}
             className="-ml-1"
           >
@@ -336,7 +360,25 @@ function AddBotFlow({ open, wizardId }: { open: boolean; wizardId: number }) {
               onDone={(name, avatar) => finish('hermes', name, avatar)}
             />
           )}
-          {!batch && phase.kind === 'idle' && !grokAccountChoiceOpen && !hermesConnectOpen && !hermesReady && (
+          {!batch && phase.kind === 'idle' && dsBotConnectOpen && (
+            <div key="dsbot-connect" className="pt-1">
+              <DsBotConnectForm
+                accountId={login.accountId}
+                onConnected={(status) => {
+                  if (!isCurrentWizard()) return
+                  login.keep()
+                  created.current = true
+                  void syncDsBotAccountBots(status.accountId, {
+                    includeDismissed: true,
+                    selectFirst: true
+                  }).finally(() => {
+                    if (isCurrentWizard()) onClose()
+                  })
+                }}
+              />
+            </div>
+          )}
+          {!batch && phase.kind === 'idle' && !grokAccountChoiceOpen && !hermesConnectOpen && !hermesReady && !dsBotConnectOpen && (
             <PlatformStep
               key="platform"
               listRef={listRef}

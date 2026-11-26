@@ -46,13 +46,14 @@ const AUDITED_STORES: ReadonlyArray<{ id: string; label: string; fileName: strin
   { id: 'dot-tokens', label: 'Dot OAuth 凭据保险箱', fileName: 'dot-accounts.json' },
   { id: 'cue-tokens', label: 'Cue 会话凭据保险箱', fileName: 'cue-tokens.json' },
   { id: 'hermes-accounts', label: 'Hermes 网关密钥保险箱', fileName: 'hermes-accounts.json' },
+  { id: 'dsbot-accounts', label: 'DS Bot 凭据与密钥保险箱', fileName: 'dsbot-accounts.json' },
   { id: 'mcp-registry', label: 'MCP 服务密钥库', fileName: 'mcp-registry.json' },
   { id: 'mobile-sync', label: 'iOS 配对设备令牌哈希库', fileName: 'mobile-sync-devices.json' },
   { id: 'secrets-vault', label: '记忆快照与私密数据保险箱', fileName: VAULT_FILE }
 ]
 
 const PLATFORM_SECURITY_SPECS: Record<
-  'meta-muse' | 'grok' | 'hark' | 'dot' | 'hermes' | 'antigravity' | 'cue',
+  'meta-muse' | 'grok' | 'hark' | 'dot' | 'hermes' | 'antigravity' | 'cue' | 'ds-bot',
   { transportProtocol: string; credentialIsolation: string }
 > = {
   'meta-muse': {
@@ -82,6 +83,10 @@ const PLATFORM_SECURITY_SPECS: Record<
   cue: {
     transportProtocol: 'Manus Connect-RPC + REST v2（TLS 1.3 · 主进程代理转发）',
     credentialIsolation: '独立 persist 分区 + 系统钥匙串 SafeStorage 密文存储（渲染层零密钥暴露）'
+  },
+  'ds-bot': {
+    transportProtocol: 'DS Bot Native Channel SSE / Noise_IK 端到端加密中继 / MCP Streamable HTTP',
+    credentialIsolation: '系统钥匙串 SafeStorage 加密存储令牌、Cookie 与 X25519 私钥（渲染层零暴露）'
   }
 }
 

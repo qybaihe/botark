@@ -108,6 +108,18 @@ export const PLATFORM_INSPECTORS: Record<PlatformId, PlatformInspectorSpec> = {
       { id: 'computer', label: 'Computer' },
       { id: 'members', label: 'Agents' }
     ]
+  },
+  'ds-bot': {
+    platformId: 'ds-bot',
+    displayName: 'DS Bot',
+    protocolLabel: 'DSH Native · Noise Relay · MCP',
+    supportsWebSession: false,
+    supportsQuickNewConversation: false,
+    tabs: [
+      { id: 'overview', label: 'Overview' },
+      { id: 'memory', label: 'Memory' },
+      { id: 'members', label: 'Agents' }
+    ]
   }
 }
 

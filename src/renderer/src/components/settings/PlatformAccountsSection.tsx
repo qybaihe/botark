@@ -50,7 +50,8 @@ export const PLATFORM_LABELS: Record<PlatformId, string> = {
   hark: 'Hark Pro',
   hermes: 'Hermes',
   antigravity: 'Antigravity',
-  cue: 'Cue (Manus)'
+  cue: 'Cue (Manus)',
+  'ds-bot': 'DS Bot'
 }
 
 export function errorMessage(error: unknown): string {

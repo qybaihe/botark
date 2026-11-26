@@ -65,6 +65,12 @@ import type {
   CueOpenLoginRequest,
   CueRpcRequest,
   CueRpcResponse,
+  DsBotAuthStatus,
+  DsBotConfigureRequest,
+  DsBotLocalDetection,
+  DsBotMainEvent,
+  DsBotRpcRequest,
+  DsBotRpcResponse,
   SecurityVaultStatus,
   VaultStatusRequest
 } from './ipc'
@@ -248,6 +254,16 @@ export interface CueBridge {
   onEvent(listener: (event: CueMainEvent) => void): () => void
 }
 
+export interface DsBotBridge {
+  configure(request: DsBotConfigureRequest): Promise<DsBotAuthStatus>
+  detectLocal(): Promise<DsBotLocalDetection>
+  authStatus(accountId: string): Promise<DsBotAuthStatus>
+  listAccounts(): Promise<DsBotAuthStatus[]>
+  clearAuth(accountId: string): Promise<DsBotAuthStatus>
+  rpc(request: DsBotRpcRequest): Promise<DsBotRpcResponse>
+  onEvent(listener: (event: DsBotMainEvent) => void): () => void
+}
+
 export interface MobileSyncBridge {
   getState(): Promise<MobileSyncStateView>
   start(): Promise<MobileSyncStateView>
@@ -292,6 +308,7 @@ export interface BotHubBridge {
   readonly hermes: HermesBridge
   readonly antigravity: AntigravityBridge
   readonly cue?: CueBridge
+  readonly dsBot?: DsBotBridge
   readonly mobileSync?: MobileSyncBridge
   readonly slack?: SlackBridge
   readonly workspace?: WorkspaceBridge

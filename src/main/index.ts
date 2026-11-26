@@ -20,6 +20,8 @@ import { cancelAllAntigravityRuns } from './antigravity/antigravityClient'
 import { registerCueIpc } from './cue/cueIpc'
 import { findCueCallbackArg, handleCueDesktopCallbackUrl } from './cue/cueDesktopHandoff'
 import { stopCueAccountWatch } from './cue/cueWatchManager'
+import { registerDsBotIpc } from './dsbot/dsBotIpc'
+import { cancelAllDsBotRuns } from './dsbot/dsBotClient'
 import { registerMobileSyncIpc, stopMobileSyncServer } from './mobileSync/mobileSyncIpc'
 import { applyAllStoredProxies } from './muse/accountProxy'
 import { closeAllLocalProxyBridges } from './localProxyBridge'
@@ -227,6 +229,7 @@ app.on('before-quit', (event) => {
   cancelHarkWatch('*')
   cancelAllHermesRuns('*')
   cancelAllAntigravityRuns('*')
+  cancelAllDsBotRuns('*')
   stopCueAccountWatch('*')
   disposeAllMuseManagers()
   const cleanup = Promise.allSettled([
@@ -260,6 +263,7 @@ app.whenReady().then(async () => {
   registerHermesIpc()
   registerAntigravityIpc()
   registerCueIpc()
+  registerDsBotIpc()
   registerMobileSyncIpc()
   registerVaultIpc()
   registerWorkspaceIpc(() => mainWindow)

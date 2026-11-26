@@ -60,6 +60,14 @@ import {
   CueSessionsSection,
   CueSkillsSection
 } from '@/components/cue/CueInfoSections'
+import {
+  DsBotMemorySection,
+  DsBotQuestionsSection,
+  DsBotSchedulesSection,
+  DsBotServerSection,
+  DsBotTeamRosterSection,
+  DsBotUsageSection
+} from '@/components/dsbot/DsBotInfoSections'
 import { MemorySection } from '@/components/muse/MemorySection'
 import { PermissionsSection } from '@/components/muse/PermissionsSection'
 import { SkillsSection } from '@/components/muse/SkillsSection'
@@ -411,6 +419,15 @@ function OpenInfoPanel({
                   <CueSkillsSection accountId={bot.activeAccountId} />
                 </>
               )}
+              {bot.platformId === 'ds-bot' && bot.activeAccountId && (
+                <>
+                  <DsBotServerSection accountId={bot.activeAccountId} agentId={bot.selectedAgentId} />
+                  <ApprovalsSection accountId={bot.activeAccountId} platformId="ds-bot" />
+                  <DsBotQuestionsSection accountId={bot.activeAccountId} />
+                  <DsBotUsageSection accountId={bot.activeAccountId} agentId={bot.selectedAgentId} />
+                  <DsBotSchedulesSection accountId={bot.activeAccountId} />
+                </>
+              )}
 
               <Section title={t('Accounts')} flush>
                 <AccountList bot={bot} accounts={accounts} />
@@ -445,7 +462,11 @@ function OpenInfoPanel({
               accounts={accounts}
             />
           ) : activeTab === 'memory' ? (
-            <DotGoalAndThreadsSection accountId={bot.activeAccountId} />
+            bot.platformId === 'ds-bot' ? (
+              <DsBotMemorySection accountId={bot.activeAccountId} agentId={bot.selectedAgentId} />
+            ) : (
+              <DotGoalAndThreadsSection accountId={bot.activeAccountId} />
+            )
           ) : activeTab === 'library' ? (
             bot.platformId === 'meta-muse' ? (
               <FilesSection accountId={bot.activeAccountId} />
@@ -541,6 +562,8 @@ function OpenInfoPanel({
                 </>
               ) : bot.platformId === 'antigravity' ? (
                 <AntigravityAgentsSection accountId={bot.activeAccountId} />
+              ) : bot.platformId === 'ds-bot' ? (
+                <DsBotTeamRosterSection accountId={bot.activeAccountId} />
               ) : (
                 <HarkInviteAndSessionsSection accountId={bot.activeAccountId} />
               )}

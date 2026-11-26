@@ -31,7 +31,8 @@ const PLATFORMS = [
   { id: 'hark', tab: 'hark-accounts', desc: '项目空间' },
   { id: 'hermes', tab: 'hermes-accounts', desc: '本地网关' },
   { id: 'antigravity', tab: 'antigravity-accounts', desc: 'Google Cloud' },
-  { id: 'cue', tab: 'cue-accounts', desc: 'Manus API' }
+  { id: 'cue', tab: 'cue-accounts', desc: 'Manus API' },
+  { id: 'ds-bot', tab: 'ds-bot-accounts', desc: 'DSH 开源团队' }
 ] as const
 
 export function OverviewSection({
@@ -54,7 +55,7 @@ export function OverviewSection({
 
   const [searchQuery, setSearchQuery] = useState('')
   const [platformFilter, setPlatformFilter] = useState<
-    'all' | 'meta-muse' | 'dot' | 'grok' | 'hark' | 'hermes' | 'antigravity'
+    'all' | 'meta-muse' | 'dot' | 'grok' | 'hark' | 'hermes' | 'antigravity' | 'cue' | 'ds-bot'
   >('all')
   const [statusFilter, setStatusFilter] = useState<'all' | 'online' | 'offline'>('all')
   const [editingBotId, setEditingBotId] = useState<string | null>(null)
@@ -206,7 +207,9 @@ export function OverviewSection({
                 { value: 'grok', label: `Grok Bot (${botCounts.get('grok') ?? 0})` },
                 { value: 'hark', label: `Hark Pro (${botCounts.get('hark') ?? 0})` },
                 { value: 'hermes', label: `Hermes (${botCounts.get('hermes') ?? 0})` },
-                { value: 'antigravity', label: `Antigravity (${botCounts.get('antigravity') ?? 0})` }
+                { value: 'antigravity', label: `Antigravity (${botCounts.get('antigravity') ?? 0})` },
+                { value: 'cue', label: `Cue (${botCounts.get('cue') ?? 0})` },
+                { value: 'ds-bot', label: `DS Bot (${botCounts.get('ds-bot') ?? 0})` }
               ]}
             />
             <Select

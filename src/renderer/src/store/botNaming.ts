@@ -55,6 +55,28 @@ export function disambiguateGrokBotName(
   return otherGrokNames.has(base.toLowerCase()) ? uniqueBotName(bots, `${base} (${accountSuffix})`) : base
 }
 
+export function isGenericDsBotName(name: string): boolean {
+  return /^DS\s*Bot(?:\s+\d+)?$/i.test(name.trim())
+}
+
+export function dsBotNamesForOtherAccounts(bots: readonly Bot[], accountId: string): ReadonlySet<string> {
+  return new Set(
+    bots
+      .filter((bot) => bot.platformId === 'ds-bot' && !bot.accountIds.includes(accountId))
+      .map((bot) => bot.name.trim().toLowerCase())
+  )
+}
+
+export function disambiguateDsBotName(
+  bots: ReadonlyArray<{ name: string }>,
+  rawName: string,
+  otherNames: ReadonlySet<string>,
+  accountSuffix: string
+): string {
+  const base = rawName.trim() || 'DS Bot'
+  return otherNames.has(base.toLowerCase()) ? uniqueBotName(bots, `${base} (${accountSuffix})`) : base
+}
+
 export function isCuePlaceholderAgentId(id: string | undefined): boolean {
   return !id || id === 'agent-default' || id.startsWith('cue_default_')
 }

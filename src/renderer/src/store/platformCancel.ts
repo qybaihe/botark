@@ -55,5 +55,14 @@ export async function cancelPlatformTurn(bot: Bot): Promise<void> {
     }
   } else if (bot.platformId === 'antigravity' && bridge?.antigravity?.cancelRun) {
     await bridge.antigravity.cancelRun(bot.activeAccountId).catch(() => undefined)
+  } else if (bot.platformId === 'ds-bot' && bridge?.dsBot?.rpc) {
+    const res = await bridge.dsBot.rpc({
+      accountId: bot.activeAccountId,
+      op: 'stopRun',
+      ...(bot.selectedAgentId ? { agentId: bot.selectedAgentId } : {})
+    })
+    if (res && res.ok === false) {
+      throw new Error(res.message || '未能确认停止 DS Bot 运行')
+    }
   }
 }

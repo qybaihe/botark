@@ -6,6 +6,7 @@ import { createDotAdapter } from "./dot/DotAdapter"
 import { createHermesAdapter } from "./hermes/HermesAdapter"
 import { createAntigravityAdapter } from "./antigravity/AntigravityAdapter"
 import { createCueAdapter } from "./cue/CueAdapter"
+import { createDsBotAdapter } from "./dsbot/DsBotAdapter"
 import { adapterRegistry, type AdapterRegistry } from "./registry"
 
 export { adapterRegistry, AdapterRegistry } from "./registry"
@@ -40,4 +41,5 @@ export function registerBuiltInAdapters(registry: AdapterRegistry = adapterRegis
   if (!registry.has("hermes")) registry.register(createHermesAdapter())
   if (!registry.has("antigravity")) registry.register(createAntigravityAdapter())
   if (!registry.has("cue")) registry.register(createCueAdapter())
+  if (!registry.has("ds-bot")) registry.register(createDsBotAdapter())
 }

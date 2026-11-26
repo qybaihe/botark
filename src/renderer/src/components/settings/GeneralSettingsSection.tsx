@@ -16,7 +16,7 @@ import { errorMessage, PLATFORM_LABELS } from './PlatformAccountsSection'
 import type { SettingsActivity } from './SettingsView'
 
 const PURGED_VAULT_STORES = new Set([
-  'proxy', 'proxy-pool', 'grok-tokens', 'dot-tokens', 'cue-tokens', 'hermes-accounts', 'secrets-vault'
+  'proxy', 'proxy-pool', 'grok-tokens', 'dot-tokens', 'cue-tokens', 'hermes-accounts', 'dsbot-accounts', 'secrets-vault'
 ])
 
 async function purgeCredentials() {
@@ -72,7 +72,8 @@ async function purgeCredentials() {
     hark: bridge?.hark,
     hermes: bridge?.hermes,
     antigravity: bridge?.antigravity,
-    cue: bridge?.cue
+    cue: bridge?.cue,
+    'ds-bot': bridge?.dsBot
   }
   const grokSessionIds = listGrokAuthAccountIds()
   for (const id of grokSessionIds) {
@@ -107,7 +108,7 @@ async function purgeCredentials() {
       const status = await auth.clearAuth(id)
       if (status?.signedIn) throw new Error(t('The account is still signed in'))
     })
-    if (platformId === 'hermes') partitionIds.delete(id)
+    if (platformId === 'hermes' || platformId === 'ds-bot') partitionIds.delete(id)
     if (cleared) signedOutIds.add(id)
   }))
 
@@ -117,7 +118,7 @@ async function purgeCredentials() {
       await bridge.webViews.clearPartition(id)
     })))
     // Include retained pool assignments and platform records outside the current Bot list.
-    await Promise.all((['dot', 'grok', 'cue', 'hermes'] as const).map(async (platform) => {
+    await Promise.all((['dot', 'grok', 'cue', 'hermes', 'ds-bot'] as const).map(async (platform) => {
       const auth = authBridges[platform]
       if (!auth?.clearAuth) return
       await attempt(PLATFORM_LABELS[platform], async () => {

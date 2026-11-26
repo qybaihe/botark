@@ -302,6 +302,48 @@ export function startAdapterBridge(): () => void {
     )
   }
 
+  const dsBotBridge = electronBridge()?.dsBot
+  if (dsBotBridge?.onEvent) {
+    unsubscribers.push(
+      dsBotBridge.onEvent((event) => {
+        const store = useBotStore.getState()
+        if (!store.accounts[event.accountId]) return
+        if (event.type === "roster_changed") {
+          void store.syncDsBotAccountBots(event.accountId).catch(() => undefined)
+          return
+        }
+        if (event.type === "stream" && !event.conversationId && event.agentId) {
+          const targets = store.bots.filter(
+            (b) =>
+              b.platformId === "ds-bot" &&
+              b.activeAccountId === event.accountId &&
+              b.selectedAgentId === event.agentId
+          )
+          for (const targetBot of targets) {
+            if (!event.done) {
+              watchdog.touch(targetBot.id)
+              if (!store.typing[targetBot.id]) store.setTyping(targetBot.id, true)
+              if (event.text) {
+                store.applyMessageDelta(event.messageId, targetBot.id, event.accountId, event.text)
+              }
+            } else {
+              store.finishReply(targetBot.id)
+              if (event.text) {
+                store.receiveMessage({
+                  id: event.messageId,
+                  conversationId: targetBot.id,
+                  accountId: event.accountId,
+                  text: event.text,
+                  createdAt: Date.now()
+                })
+              }
+            }
+          }
+        }
+      })
+    )
+  }
+
   const watchdogTimer = setInterval(checkStalledReplies, 15_000)
 
   return () => {

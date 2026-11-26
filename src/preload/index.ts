@@ -7,6 +7,7 @@ import {
   ANTIGRAVITY_CHANNELS,
   CUE_CHANNELS,
   DOT_CHANNELS,
+  DS_BOT_CHANNELS,
   GROK_CHANNELS,
   HARK_CHANNELS,
   HERMES_CHANNELS,
@@ -17,6 +18,7 @@ import {
   type AntigravityMainEvent,
   type CueMainEvent,
   type DotMainEvent,
+  type DsBotMainEvent,
   type GrokMainEvent,
   type HarkMainEvent,
   type HermesMainEvent,
@@ -194,6 +196,19 @@ const bridge: BotHubBridge = {
       const handler = (_event: unknown, payload: CueMainEvent) => listener(payload)
       ipcRenderer.on(CUE_CHANNELS.event, handler)
       return () => ipcRenderer.removeListener(CUE_CHANNELS.event, handler)
+    }
+  },
+  dsBot: {
+    configure: (request) => ipcRenderer.invoke(DS_BOT_CHANNELS.configure, request),
+    detectLocal: () => ipcRenderer.invoke(DS_BOT_CHANNELS.detectLocal),
+    authStatus: (accountId) => ipcRenderer.invoke(DS_BOT_CHANNELS.authStatus, accountId),
+    listAccounts: () => ipcRenderer.invoke(DS_BOT_CHANNELS.listAccounts),
+    clearAuth: (accountId) => ipcRenderer.invoke(DS_BOT_CHANNELS.clearAuth, accountId),
+    rpc: (request) => ipcRenderer.invoke(DS_BOT_CHANNELS.rpc, request),
+    onEvent: (listener) => {
+      const handler = (_event: unknown, payload: DsBotMainEvent) => listener(payload)
+      ipcRenderer.on(DS_BOT_CHANNELS.event, handler)
+      return () => ipcRenderer.removeListener(DS_BOT_CHANNELS.event, handler)
     }
   },
   slack: {

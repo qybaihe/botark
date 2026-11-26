@@ -41,7 +41,8 @@ const PLATFORM_LOGIN_LABELS: Record<PlatformId, string> = {
   dot: '使用 ChatGPT Dot 登录',
   hermes: '配置 Hermes 连接',
   antigravity: '使用 Antigravity 登录',
-  cue: '使用 Cue 登录'
+  cue: '使用 Cue 登录',
+  'ds-bot': '配置 DS Bot 连接'
 }
 
 function ConversationIntro({
@@ -193,6 +194,9 @@ export function ChatArea() {
         return onAntigravityLogin(activeAccount.id)
       case 'cue':
         return onCueLogin(activeAccount.id)
+      case 'ds-bot':
+        useBotStore.getState().setSettingsOpen(true, 'ds-bot-accounts')
+        return
     }
   }
 

@@ -57,6 +57,7 @@ function ConnectionNotice({
   const isHermes = account.platformId === 'hermes'
   const isAntigravity = account.platformId === 'antigravity'
   const isCue = account.platformId === 'cue'
+  const isDsBot = account.platformId === 'ds-bot'
   return (
     <div
       className={cn(
@@ -87,7 +88,9 @@ function ConnectionNotice({
                       ? '登录 Google Antigravity（antigravity.google.com）后即可发消息'
                       : isCue
                         ? '登录 Cue（cue.im）后即可发消息'
-                        : '账号未连接'}
+                        : isDsBot
+                          ? '连接 DS Bot（MCP Token / 加密配对链接 / DSH Web）后即可发消息'
+                          : '账号未连接'}
       </span>
       {isMuse && onMuseLogin && !isError ? (
         <>

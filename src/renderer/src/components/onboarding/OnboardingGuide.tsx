@@ -47,6 +47,7 @@ interface PlatformGuideItem {
     | 'dot-accounts'
     | 'hermes-accounts'
     | 'antigravity-accounts'
+    | 'ds-bot-accounts'
   accountRule: string
   importMethods: string
   workbenchCards: Array<{ title: string; summary: string }>
@@ -148,6 +149,21 @@ const PLATFORM_GUIDE_ITEMS: PlatformGuideItem[] = [
     shape: 'crystal',
     color: 'blue',
     grokState: 'streaming'
+  },
+  {
+    id: 'ds-bot',
+    title: 'DS Bot',
+    settingsTab: 'ds-bot-accounts',
+    accountRule: '1 个 DS Bot 实例自动展开团队内全部 Bot 成员与群聊，并可参与跨平台协作室',
+    importMethods: '支持 MCP Token（本机/远程）、Noise_IK 加密配对链接与 DSH Web / Docker 直连',
+    workbenchCards: [
+      { title: '实时流式对话与多 Bot 同步', summary: '原生直连 DS Bot 团队，支持 1v1 Bot 与群聊对话同步及图片发送' },
+      { title: '交互式工具审批与问题回复', summary: '在侧栏直接批准或拒绝危险操作、回答 ask_user 提问卡片' },
+      { title: '长期记忆、定时任务与用量', summary: '读写 MEMORY.md 长期记忆、管理定时自动化任务并查看 Token 统计' }
+    ],
+    shape: 'blob',
+    color: 'blue',
+    grokState: 'happy'
   }
 ]
 
@@ -212,6 +228,7 @@ function FullScreenGuideBody({
       | 'dot-accounts'
       | 'hermes-accounts'
       | 'antigravity-accounts'
+      | 'ds-bot-accounts'
   ) => {
     markOnboardingSeen()
     setOnboardingOpen(false)

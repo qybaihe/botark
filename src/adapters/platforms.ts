@@ -66,6 +66,14 @@ export const PLATFORMS: readonly PlatformDescriptor[] = [
     monogram: 'Cu',
     homeUrl: 'https://cue.im/',
     loginUrl: 'https://cue.im/login'
+  },
+  {
+    id: 'ds-bot',
+    name: 'DS Bot',
+    description: 'DeepSeek Harness 开源智能体团队 · 多 Bot / 群聊同步、流式对话、审批与记忆',
+    availability: 'available',
+    monogram: 'DS',
+    homeUrl: 'http://127.0.0.1:8797/mcp'
   }
 ]
 

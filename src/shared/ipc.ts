@@ -1378,7 +1378,7 @@ export interface SecurityStoreAudit {
 
 export interface SecurityAccountAudit {
   accountId: string
-  platformId?: 'meta-muse' | 'grok' | 'hark' | 'dot' | 'hermes' | 'antigravity' | 'cue'
+  platformId?: 'meta-muse' | 'grok' | 'hark' | 'dot' | 'hermes' | 'antigravity' | 'cue' | 'ds-bot'
   partition: string
   transportProtocol: string
   credentialIsolation: string
@@ -1405,7 +1405,7 @@ export interface SecurityVaultStatus {
 
 export interface VaultStatusRequest {
   accountId?: string
-  platformId?: 'meta-muse' | 'grok' | 'hark' | 'dot' | 'hermes' | 'antigravity' | 'cue'
+  platformId?: 'meta-muse' | 'grok' | 'hark' | 'dot' | 'hermes' | 'antigravity' | 'cue' | 'ds-bot'
 }
 
 export const CUE_CHANNELS = {
@@ -1662,6 +1662,264 @@ export type AntigravityMainEvent =
       activityEmoji?: string | null
       busy: boolean
     }
+
+export const DS_BOT_CHANNELS = {
+  configure: 'bothub:dsbot:configure',
+  detectLocal: 'bothub:dsbot:detect-local',
+  authStatus: 'bothub:dsbot:auth-status',
+  listAccounts: 'bothub:dsbot:list-accounts',
+  clearAuth: 'bothub:dsbot:clear-auth',
+  rpc: 'bothub:dsbot:rpc',
+  event: 'bothub:dsbot:event'
+} as const
+
+export type DsBotTransportMode = 'mcp' | 'channel' | 'relay'
+
+export interface DsBotConfigureRequest {
+  accountId: string
+  mode: DsBotTransportMode
+  /** Display name for this DS Bot team/host instance. */
+  displayName?: string
+  /** MCP mode: `http://127.0.0.1:8797/mcp` or remote URL; Channel mode: DSH Web URL (may include `?token=...`). */
+  endpointUrl?: string
+  /** MCP mode bearer token (`dsb_...`) or Channel mode optional `Cookie` header. */
+  secret?: string
+  /** Relay mode: `dsbot://pair?v=1&...` or browser pairing URL. */
+  pairingUri?: string
+  /** Keep previously stored encrypted credentials when editing displayName / endpoint on same origin. */
+  keepExistingSecret?: boolean
+}
+
+export interface DsBotLocalDetection {
+  mcpReachable: boolean
+  mcpUrl: string
+  mcpPort: number
+  mcpEnabledInConfig: boolean
+  mcpConfigPath?: string
+  channelReachable: boolean
+  channelUrl?: string
+  channelPort?: number
+  dataDir?: string
+}
+
+export interface DsBotAuthStatus {
+  accountId: string
+  signedIn: boolean
+  mode?: DsBotTransportMode
+  baseUrl?: string
+  relayServer?: string
+  hostDeviceId?: string
+  hostName?: string
+  handle?: string
+  displayName?: string
+  version?: string
+  hasSecret?: boolean
+  hasProxy?: boolean
+  botCount?: number
+  groupCount?: number
+  supportsLiveStream?: boolean
+  supportsApprovals?: boolean
+  supportsMemory?: boolean
+  supportsSchedules?: boolean
+  supportsImages?: boolean
+  error?: string
+}
+
+export interface DsBotTargetInfo {
+  /** Prefixed agent id for BotArk routing: `bot:<id>` or `room:<id>`. */
+  id: string
+  /** Raw DS Bot botId or roomId. */
+  rawId: string
+  kind: 'bot' | 'room'
+  name: string
+  role?: string
+  model?: string
+  color?: string
+  avatarShape?: string
+  avatarImage?: string
+  main?: boolean
+  working?: boolean
+  sessionId?: string
+  workDir?: string
+  members?: string[]
+  preview?: string
+  lastAt?: number
+}
+
+export interface DsBotModelInfo {
+  ref: string
+  name: string
+  provider?: string
+  providerName?: string
+}
+
+export interface DsBotApprovalView {
+  id: string
+  botId?: string
+  botName?: string
+  roomId?: string
+  roomName?: string
+  sessionId?: string
+  tool: string
+  reason?: string
+  detail?: string
+  at?: number
+  answerable: boolean
+}
+
+export interface DsBotQuestionView {
+  id: string
+  sessionId: string
+  botId?: string
+  botName?: string
+  question: string
+  detail?: string
+  options?: Array<{ label: string }>
+  multiSelect?: boolean
+  answerable: boolean
+}
+
+export interface DsBotMemoryEntry {
+  scope: string
+  topic?: string
+  text: string
+  pinned?: boolean
+  added?: string
+}
+
+export interface DsBotMemoryView {
+  summary?: string | null
+  entries: DsBotMemoryEntry[]
+  memoryEnabled: boolean
+}
+
+export interface DsBotScheduleItem {
+  id: string
+  sessionId: string
+  title: string
+  prompt: string
+  kind?: string
+  state: string
+  status?: string
+  scheduledAt?: string
+  botId?: string
+  roomId?: string
+  canPause?: boolean
+}
+
+export interface DsBotUsageBucket {
+  input: number
+  cacheRead: number
+  cacheWrite: number
+  output: number
+  calls: number
+}
+
+export interface DsBotUsageSummary {
+  botId: string
+  day: DsBotUsageBucket
+  week: DsBotUsageBucket
+  month: DsBotUsageBucket
+  models: Array<{ key: string; name: string } & DsBotUsageBucket>
+  scanning?: boolean
+}
+
+export interface DsBotHistoryMessage {
+  id: string
+  role: 'user' | 'assistant'
+  text: string
+  createdAt: number
+  senderName?: string
+  tools?: MuseToolCallView[]
+  media?: MuseMediaPartView[]
+}
+
+export type DsBotMainEvent =
+  | { type: 'accepted'; accountId: string; requestId: string; agentId?: string }
+  | {
+      type: 'login'
+      accountId: string
+      signedIn: true
+      handle?: string
+      displayName?: string
+    }
+  | {
+      type: 'login'
+      accountId: string
+      signedIn: false
+    }
+  | {
+      type: 'roster_changed'
+      accountId: string
+    }
+  | {
+      type: 'stream'
+      accountId: string
+      agentId: string
+      conversationId?: string
+      sessionId?: string
+      requestId?: string
+      messageId: string
+      text: string
+      done: boolean
+      tools?: MuseToolCallView[]
+      media?: MuseMediaPartView[]
+    }
+  | {
+      type: 'activity'
+      accountId: string
+      agentId?: string
+      requestId?: string
+      activityCode: string
+      activityText?: string
+      activityEmoji?: string
+      busy: boolean
+    }
+  | {
+      type: 'approvals'
+      accountId: string
+      pending: DsBotApprovalView[]
+      questions?: DsBotQuestionView[]
+    }
+
+export type DsBotRpcRequest =
+  | { accountId: string; op: 'listTargets' }
+  | { accountId: string; op: 'getState' }
+  | { accountId: string; op: 'listModels' }
+  | { accountId: string; op: 'getHistory'; agentId: string }
+  | {
+      accountId: string
+      op: 'sendMessage'
+      agentId: string
+      botId?: string
+      requestId?: string
+      text: string
+      attachments?: Array<{ name: string; mimeType: string; dataBase64: string }>
+    }
+  | { accountId: string; op: 'stopRun'; agentId?: string; requestId?: string }
+  | { accountId: string; op: 'listWaiting' }
+  | { accountId: string; op: 'decideApproval'; approvalId: string; choice: 'allow' | 'reject' }
+  | { accountId: string; op: 'answerQuestion'; sessionId: string; questionId: string; answer: string }
+  | { accountId: string; op: 'getMemory'; agentId: string }
+  | { accountId: string; op: 'addMemory'; agentId: string; text: string; scope?: string; topic?: string }
+  | { accountId: string; op: 'forgetMemory'; agentId: string; text: string; scope?: string; topic?: string }
+  | { accountId: string; op: 'listSchedules' }
+  | {
+      accountId: string
+      op: 'toggleSchedule'
+      scheduleId: string
+      sessionId: string
+      active: boolean
+    }
+  | { accountId: string; op: 'deleteSchedule'; scheduleId: string; sessionId: string }
+  | { accountId: string; op: 'getUsage'; agentId: string }
+  | { accountId: string; op: 'setBotModel'; agentId: string; model: string }
+  | { accountId: string; op: 'createBot'; name: string; role?: string; model?: string; instructions?: string }
+
+export type DsBotRpcResponse =
+  | { ok: true; data: unknown }
+  | { ok: false; status: number; code?: string; message: string; body?: string }
+
 
 
 

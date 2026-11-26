@@ -11,7 +11,8 @@ import { t } from '@/lib/i18n'
 import type { AccountDraft, Bot, BotAccount, BotGroup, ChatMessage, ChatReplyTarget, NewBotInput } from '@/types'
 import { getEventBot } from '@/services/sessionEvents'
 import {
-  disambiguateGrokBotName, grokNamesForOtherAccounts, isCuePlaceholderAgentId, isGenericGrokName, materializeAccounts,
+  disambiguateDsBotName, disambiguateGrokBotName, dsBotNamesForOtherAccounts, grokNamesForOtherAccounts,
+  isCuePlaceholderAgentId, isGenericDsBotName, isGenericGrokName, materializeAccounts,
   nameOrPlatformDefault, newCueBotName, PROXY_POOL_PLATFORMS, proxyPoolArgsForAccounts, syncedCueBotName, uniqueGroupName
 } from './botNaming'
 import {
@@ -20,7 +21,7 @@ import {
   SendTimeoutError, toPersistedMessages, withTimeout
 } from './delivery'
 import {
-  antigravityHistory, cueHistory, dotHistory, grokHistory, harkHistory, hermesHistory, mergeHydratedMessages,
+  antigravityHistory, cueHistory, dotHistory, dsBotHistory, grokHistory, harkHistory, hermesHistory, mergeHydratedMessages,
   mergeIncomingReply, mergeReplyDelta, museHistory, sameChatMessage
 } from './historyNormalizers'
 import { cancelPlatformTurn } from './platformCancel'
@@ -50,6 +51,7 @@ function partializeWorkspace(state: BotHubState) {
     selectedBotId: state.selectedBotId,
     collapsedGroups: state.collapsedGroups,
     dismissedGrokAgents: state.dismissedGrokAgents,
+    dismissedDsBotAgents: state.dismissedDsBotAgents,
     webSessionByBot: state.webSessionByBot,
     infoPanelOpen: state.infoPanelOpen,
     sidebarCollapsed: state.sidebarCollapsed,
@@ -151,6 +153,7 @@ export interface BotHubState {
     | 'hermes-accounts'
     | 'antigravity-accounts'
     | 'cue-accounts'
+    | 'ds-bot-accounts'
     | 'mcp-hub'
     | 'mobile-sync'
     | 'proxy-pool'
@@ -162,6 +165,8 @@ export interface BotHubState {
   chatActionErrors: Record<string, string | undefined>
   /** Per-account Grok agentIds explicitly removed from sidebar so auto-sync respects user deletion until manual sync. */
   dismissedGrokAgents: Record<string, string[]>
+  /** Per-account DS Bot target ids (`bot:<id>` / `room:<id>`) explicitly removed from sidebar until manual sync. */
+  dismissedDsBotAgents: Record<string, string[]>
 
   // Navigation & layout
   selectBot: (botId: string) => void
@@ -198,6 +203,7 @@ export interface BotHubState {
       | 'hermes-accounts'
       | 'antigravity-accounts'
       | 'cue-accounts'
+      | 'ds-bot-accounts'
       | 'mcp-hub'
       | 'mobile-sync'
       | 'proxy-pool'
@@ -283,6 +289,10 @@ export interface BotHubState {
   syncCueAccountBots: (
     accountId: string,
     opts?: { selectFirst?: boolean; preferredGroupId?: string }
+  ) => Promise<number>
+  syncDsBotAccountBots: (
+    accountId: string,
+    opts?: { selectFirst?: boolean; preferredGroupId?: string; includeDismissed?: boolean }
   ) => Promise<number>
   /** Hydrate full Cue session history (older turns + latest messages) for a Cue bot. */
   hydrateCueBotHistory: (botId: string) => Promise<number>
@@ -584,11 +594,14 @@ export const useBotStore = create<BotHubState>()(
               : platformId === 'hark' ? bridge?.hark
               : platformId === 'hermes' ? bridge?.hermes
               : platformId === 'antigravity' ? bridge?.antigravity
-              : platformId === 'cue' ? bridge?.cue : undefined
+              : platformId === 'cue' ? bridge?.cue
+              : platformId === 'ds-bot' ? bridge?.dsBot : undefined
             await platformBridge?.clearAuth?.(accountId)
           } finally {
             if (platformId === 'grok') (adapter as { clearAuth?: (id: string) => void })?.clearAuth?.(accountId)
-            if (platformId !== 'hermes') await bridge?.webViews?.clearPartition?.(accountId)
+            if (platformId !== 'hermes' && platformId !== 'ds-bot') {
+              await bridge?.webViews?.clearPartition?.(accountId)
+            }
           }
         }
         patchAccount(accountId, { status: 'offline', statusDetail: 'Signed out', unread: 0 })
@@ -803,6 +816,7 @@ export const useBotStore = create<BotHubState>()(
     hermesSessionErrors: {},
     chatActionErrors: {},
     dismissedGrokAgents: {},
+    dismissedDsBotAgents: {},
 
     setActiveDocument: (doc) => set({ activeDocument: doc }),
 
@@ -1164,6 +1178,7 @@ export const useBotStore = create<BotHubState>()(
         const turn = clearedSession(s, bot)
         const { [botId]: _sessionError, ...hermesSessionErrors } = s.hermesSessionErrors
         let dismissedGrokAgents = s.dismissedGrokAgents
+        let dismissedDsBotAgents = s.dismissedDsBotAgents
         if (
           bot.platformId === 'grok' &&
           bot.selectedAgentId &&
@@ -1178,6 +1193,20 @@ export const useBotStore = create<BotHubState>()(
             }
           }
         }
+        if (
+          bot.platformId === 'ds-bot' &&
+          bot.selectedAgentId &&
+          bot.activeAccountId &&
+          !orphaned.includes(bot.activeAccountId)
+        ) {
+          const prev = s.dismissedDsBotAgents[bot.activeAccountId] ?? []
+          if (!prev.includes(bot.selectedAgentId)) {
+            dismissedDsBotAgents = {
+              ...s.dismissedDsBotAgents,
+              [bot.activeAccountId]: [...prev, bot.selectedAgentId]
+            }
+          }
+        }
         return {
           ...turn,
           bots: s.bots.filter((b) => b.id !== botId),
@@ -1186,6 +1215,7 @@ export const useBotStore = create<BotHubState>()(
           activity: orphaned.reduce(omitKey, turn.activity),
           hermesSessionErrors,
           dismissedGrokAgents,
+          dismissedDsBotAgents,
           selectedBotId: s.selectedBotId === botId ? (neighbour?.id ?? null) : s.selectedBotId
         }
       })
@@ -1801,6 +1831,29 @@ export const useBotStore = create<BotHubState>()(
             .catch(() => undefined)
         } else if (bot.platformId === 'cue' && bridge?.cue?.rpc) {
           void hydrateCueHistoryForBot(bot.activeAccountId, bot)
+        } else if (bot.platformId === 'ds-bot' && bridge?.dsBot?.rpc) {
+          void bridge.dsBot
+            .rpc({
+              accountId: bot.activeAccountId,
+              op: 'getHistory',
+              agentId: trimmed
+            })
+            .then((res) => {
+              if (!isCurrentSession(bot, selection)) return
+              if (!res.ok) return
+              const hydrated = dsBotHistory(res.data, botId, bot.activeAccountId, trimmed)
+              if (!hydrated) return
+              set((s) => ({
+                accounts: applyAccountLive(s.accounts, bot.activeAccountId, 'online', ['offline', 'error']),
+                messages: {
+                  ...s.messages,
+                  [botId]: hydrated.length === 0
+                    ? (s.messages[botId] ?? []).filter((m) => !m.agentId || m.agentId === trimmed)
+                    : mergeHydratedMessages(s.messages[botId] ?? [], hydrated)
+                }
+              }))
+            })
+            .catch(() => undefined)
         }
       } catch {
         /* ignore */
@@ -1944,6 +1997,8 @@ export const useBotStore = create<BotHubState>()(
           await get().syncGrokAccountBots(accountId)
         } else if (account.platformId === 'cue' && (status === 'online' || status === 'busy')) {
           await get().syncCueAccountBots(accountId)
+        } else if (account.platformId === 'ds-bot' && (status === 'online' || status === 'busy')) {
+          await get().syncDsBotAccountBots(accountId)
         }
       } catch (error) {
         if (isCurrent()) patchAccount(accountId, { status: 'error', statusDetail: errorMessage(error) })
@@ -2289,6 +2344,244 @@ export const useBotStore = create<BotHubState>()(
       if (
         activeSelected &&
         activeSelected.platformId === 'grok' &&
+        activeSelected.accountIds.includes(accountId) &&
+        activeSelected.selectedAgentId
+      ) {
+        hydrateSet.set(activeSelected.id, activeSelected.selectedAgentId)
+      }
+      for (const [bId, agId] of hydrateSet.entries()) {
+        get().setSelectedAgent(bId, agId)
+      }
+
+      return accountBots.length
+    },
+
+    syncDsBotAccountBots: async (accountId, opts) => {
+      if (accountCleanup.has(accountId) || credentialCleanup) return 0
+      const isCurrent = watchAccount(accountId)
+      const adapter = adapterRegistry.get('ds-bot') as
+        | {
+            connect?: (accId: string) => Promise<ConnectionStatus>
+            listCachedAgents?: (accId: string) => Array<{
+              id: string
+              name: string
+              description?: string
+              avatarShape?: string
+              avatarColor?: string
+            }>
+            refreshAgents?: (accId: string) => Promise<
+              Array<{
+                id: string
+                name: string
+                description?: string
+                avatarShape?: string
+                avatarColor?: string
+              }>
+            >
+            bindConversationAgent?: (convId: string, agentId: string, accId?: string) => void
+          }
+        | undefined
+      if (!adapter) return 0
+
+      if (!get().accounts[accountId]) {
+        const auth = await electronBridge()?.dsBot?.authStatus?.(accountId).catch(() => null)
+        if (!isCurrent()) return 0
+        set((s) => ({
+          accounts: {
+            ...s.accounts,
+            [accountId]: {
+              id: accountId,
+              platformId: 'ds-bot',
+              displayName: auth?.displayName || auth?.hostName || 'DS Bot',
+              handle: auth?.handle || auth?.baseUrl || auth?.relayServer || '',
+              status: auth?.signedIn ? 'online' : 'offline'
+            }
+          }
+        }))
+      }
+
+      if (opts?.includeDismissed) {
+        set((s) => {
+          if (!s.dismissedDsBotAgents[accountId]) return s
+          const { [accountId]: _cleared, ...rest } = s.dismissedDsBotAgents
+          return { dismissedDsBotAgents: rest }
+        })
+      }
+
+      let agents = await adapter.refreshAgents?.(accountId).catch(() => []) ?? []
+      if (agents.length === 0) {
+        agents = adapter.listCachedAgents?.(accountId) ?? []
+      }
+      if (!isCurrent()) return 0
+
+      const state = get()
+      if (!state.accounts[accountId] || state.accounts[accountId]?.platformId !== 'ds-bot') {
+        return 0
+      }
+
+      const dismissed = new Set(
+        opts?.includeDismissed ? [] : (state.dismissedDsBotAgents[accountId] ?? [])
+      )
+      const visibleAgents = agents.filter((a) => !dismissed.has(a.id))
+      const allAgentIds = new Set(agents.map((a) => a.id))
+
+      let groups = state.groups
+      const existingForAccount = state.bots.filter(
+        (b) => b.platformId === 'ds-bot' && b.accountIds.includes(accountId)
+      )
+      const selectedGroup = state.bots.find((b) => b.id === state.selectedBotId)?.groupId
+      const targetGroupId =
+        opts?.preferredGroupId ??
+        existingForAccount[0]?.groupId ??
+        selectedGroup ??
+        groups[0]?.id ??
+        createId('grp')
+      if (!groups.some((g) => g.id === targetGroupId)) {
+        groups = [...groups, { id: targetGroupId, name: 'Workspace' }]
+      }
+
+      if (visibleAgents.length === 0) {
+        if (existingForAccount.length === 0 && agents.length === 0) {
+          const placeholderId = createId('bot')
+          const acc = get().accounts[accountId]
+          const bot: Bot = {
+            id: placeholderId,
+            name: acc?.displayName || 'DS Bot',
+            emoji: '🐋',
+            description: '',
+            platformId: 'ds-bot',
+            groupId: targetGroupId,
+            accountIds: [accountId],
+            activeAccountId: accountId,
+            memory: [],
+            notes: '',
+            createdAt: Date.now(),
+            unread: 0
+          }
+          set((s) => ({
+            groups,
+            bots: [...s.bots, bot],
+            messages: { ...s.messages, [bot.id]: s.messages[bot.id] ?? [] },
+            selectedBotId: opts?.selectFirst || !s.selectedBotId ? bot.id : s.selectedBotId,
+            collapsedGroups: { ...s.collapsedGroups, [targetGroupId]: false }
+          }))
+          return 1
+        }
+        return existingForAccount.length
+      }
+
+      const claimedBotIds = new Set<string>()
+      const botsToHydrate: Array<{ botId: string; agentId: string }> = []
+      const nextBots = [...state.bots]
+      const nextMessages = { ...state.messages }
+      const otherDsNames = dsBotNamesForOtherAccounts(nextBots, accountId)
+      const accountSuffix = get().accounts[accountId]?.displayName || get().accounts[accountId]?.handle || accountId.slice(-4)
+
+      const unmatchedAgents: typeof visibleAgents = []
+      for (const agent of visibleAgents) {
+        const exactIdx = nextBots.findIndex(
+          (b) =>
+            b.platformId === 'ds-bot' &&
+            b.accountIds.includes(accountId) &&
+            b.selectedAgentId === agent.id &&
+            !claimedBotIds.has(b.id)
+        )
+        if (exactIdx >= 0) {
+          const prev = nextBots[exactIdx]!
+          claimedBotIds.add(prev.id)
+          nextBots[exactIdx] = {
+            ...prev,
+            name:
+              isGenericDsBotName(prev.name) && agent.name
+                ? disambiguateDsBotName(nextBots, agent.name, otherDsNames, accountSuffix)
+                : prev.name,
+            description: agent.description ?? prev.description,
+            ...(agent.avatarShape ? { avatarShape: agent.avatarShape } : {}),
+            ...(agent.avatarColor ? { avatarColor: agent.avatarColor } : {})
+          }
+          adapter.bindConversationAgent?.(prev.id, agent.id, accountId)
+        } else {
+          unmatchedAgents.push(agent)
+        }
+      }
+
+      for (const agent of unmatchedAgents) {
+        const placeholderIdx = nextBots.findIndex(
+          (b) =>
+            b.platformId === 'ds-bot' &&
+            b.accountIds.includes(accountId) &&
+            !claimedBotIds.has(b.id) &&
+            (!b.selectedAgentId || !allAgentIds.has(b.selectedAgentId))
+        )
+        if (placeholderIdx >= 0) {
+          const prev = nextBots[placeholderIdx]!
+          claimedBotIds.add(prev.id)
+          nextBots[placeholderIdx] = {
+            ...prev,
+            name: agent.name
+              ? disambiguateDsBotName(nextBots, agent.name, otherDsNames, accountSuffix)
+              : prev.name,
+            selectedAgentId: agent.id,
+            description: agent.description ?? prev.description,
+            ...(agent.avatarShape ? { avatarShape: agent.avatarShape } : {}),
+            ...(agent.avatarColor ? { avatarColor: agent.avatarColor } : {})
+          }
+          botsToHydrate.push({ botId: prev.id, agentId: agent.id })
+        } else {
+          const newBotId = createId('bot')
+          claimedBotIds.add(newBotId)
+          const isGroup = agent.id.startsWith('room:')
+          const newBot: Bot = {
+            id: newBotId,
+            name: disambiguateDsBotName(
+              nextBots,
+              agent.name || (isGroup ? 'DS Bot 群聊' : 'DS Bot'),
+              otherDsNames,
+              accountSuffix
+            ),
+            emoji: isGroup ? '👥' : '🐋',
+            ...(agent.avatarShape ? { avatarShape: agent.avatarShape } : {}),
+            ...(agent.avatarColor ? { avatarColor: agent.avatarColor } : {}),
+            selectedAgentId: agent.id,
+            description: agent.description ?? '',
+            platformId: 'ds-bot',
+            groupId: targetGroupId,
+            accountIds: [accountId],
+            activeAccountId: accountId,
+            memory: [],
+            notes: '',
+            createdAt: Date.now(),
+            unread: 0
+          }
+          nextBots.push(newBot)
+          nextMessages[newBotId] = nextMessages[newBotId] ?? []
+          botsToHydrate.push({ botId: newBotId, agentId: agent.id })
+        }
+      }
+
+      const accountBots = nextBots.filter(
+        (b) => b.platformId === 'ds-bot' && b.accountIds.includes(accountId)
+      )
+      const firstAccountBot = accountBots[0]
+      const nextSelectedId =
+        opts?.selectFirst && firstAccountBot
+          ? firstAccountBot.id
+          : state.selectedBotId ?? firstAccountBot?.id ?? null
+
+      set((s) => ({
+        groups,
+        bots: nextBots,
+        messages: nextMessages,
+        selectedBotId: nextSelectedId,
+        collapsedGroups: { ...s.collapsedGroups, [targetGroupId]: false }
+      }))
+
+      const hydrateSet = new Map<string, string>()
+      for (const item of botsToHydrate) hydrateSet.set(item.botId, item.agentId)
+      const activeSelected = get().bots.find((b) => b.id === get().selectedBotId)
+      if (
+        activeSelected &&
+        activeSelected.platformId === 'ds-bot' &&
         activeSelected.accountIds.includes(accountId) &&
         activeSelected.selectedAgentId
       ) {
@@ -2764,6 +3057,7 @@ export const useBotStore = create<BotHubState>()(
         await bridge?.grok?.clearAuth?.('*').catch(() => undefined)
         await bridge?.cue?.clearAuth?.('*').catch(() => undefined)
         await bridge?.hermes?.clearAuth?.('*').catch(() => undefined)
+        await bridge?.dsBot?.clearAuth?.('*').catch(() => undefined)
         await bridge?.muse?.clearProxyPool?.().catch(() => undefined)
         await bridge?.vault?.clearAll?.().catch(() => undefined)
         try {
@@ -2798,6 +3092,7 @@ export const useBotStore = create<BotHubState>()(
         chatActionErrors: {},
         replyingTo: {},
         dismissedGrokAgents: {},
+        dismissedDsBotAgents: {},
         webSessionByBot: {},
         webSessionOpen: false,
         webSessionTargetUrl: null,

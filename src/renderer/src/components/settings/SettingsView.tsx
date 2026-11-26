@@ -2,6 +2,7 @@ import { useMemo, useRef, useState } from 'react'
 import { Activity, ArrowLeft, LayoutDashboard, Server, Settings, Smartphone, Sparkles, Users, type LucideIcon } from 'lucide-react'
 import type { PlatformId } from '@adapters/types'
 import { HermesAccountsSettingsPanel } from '@/components/hermes/HermesAccountsSettingsPanel'
+import { DsBotAccountsSettingsPanel } from '@/components/dsbot/DsBotAccountsSettingsPanel'
 import { PaneHeader } from '@/components/layout/PaneHeader'
 import { MobileSyncSettingsPanel } from '@/components/mobile-sync/MobileSyncSettingsPanel'
 import { ArkMobileLinkSvg } from '@/components/ui/ArkGlyphs'
@@ -108,6 +109,13 @@ export function SettingsView() {
       platformId: 'cue',
       count: accountCount('cue')
     },
+    {
+      id: 'ds-bot-accounts',
+      label: 'DS Bot',
+      icon: Server,
+      platformId: 'ds-bot',
+      count: accountCount('ds-bot')
+    },
     { id: 'mcp-hub', label: tr('MCP & Workspace'), icon: Server },
     { id: 'mobile-sync', label: tr('Mobile Sync'), icon: Smartphone },
     { id: 'proxy-pool', label: tr('Proxy pool'), icon: Server, count: proxyPool.pool.length },
@@ -213,6 +221,7 @@ export function SettingsView() {
               dot={dot}
             />
             {settingsTab === 'hermes-accounts' && <HermesAccountsSettingsPanel />}
+            {settingsTab === 'ds-bot-accounts' && <DsBotAccountsSettingsPanel />}
             {settingsTab === 'mobile-sync' && <MobileSyncSettingsPanel />}
             <ProxyPoolSection
               active={settingsTab === 'proxy-pool'}

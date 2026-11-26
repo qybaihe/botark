@@ -54,6 +54,12 @@ describe('platformInspector', () => {
       'members'
     ])
     expect(PLATFORM_INSPECTORS.cue.supportsQuickNewConversation).toBe(false)
+    expect(PLATFORM_INSPECTORS['ds-bot'].tabs.map((t) => t.id)).toEqual([
+      'overview',
+      'memory',
+      'members'
+    ])
+    expect(PLATFORM_INSPECTORS['ds-bot'].supportsWebSession).toBe(false)
   })
 
   it('disables web session pane for Grok Bot, Hermes & Cue while keeping it on web-backed platforms', () => {
