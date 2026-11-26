@@ -215,7 +215,7 @@ function McpScopeSettings({
 
   const [dsBotOpen, setDsBotOpen] = useState(false)
   const [dsBotToken, setDsBotToken] = useState('')
-  const [dsBotPort, setDsBotPort] = useState('8797')
+  const [dsBotEndpoint, setDsBotEndpoint] = useState('8797')
 
   // JSON Paste Dialog state
   const [pasteOpen, setPasteOpen] = useState(false)
@@ -306,7 +306,7 @@ function McpScopeSettings({
 
   async function connectDsBot() {
     try {
-      const server = dsBotServer(Number(dsBotPort), dsBotToken, scopeType)
+      const server = dsBotServer(dsBotEndpoint, dsBotToken, scopeType)
       setFormError(undefined)
       await runManage({ op: 'upsert', server, autoStart: true }, (next) => {
         const connected = next.servers.find((item) => item.name === server.name && ownerFor(item) === scopeType)
@@ -482,7 +482,7 @@ function McpScopeSettings({
           </Button>
           <Button size="sm" variant="secondary" disabled={rowActionsDisabled} onClick={() => {
             if (existingDsBot) return openEdit(existingDsBot)
-            setDsBotPort('8797')
+            setDsBotEndpoint('8797')
             setFormError(undefined)
             setError(undefined)
             setDsBotOpen(true)
@@ -827,16 +827,23 @@ function McpScopeSettings({
         setDsBotOpen(next)
         if (!next) setDsBotToken('')
       }} title={L('连接 DS Bot 团队', 'Connect a DS Bot team')}
-        footer={<Button variant="primary" disabled={busy || !dsBotToken.trim()} onClick={() => void connectDsBot()}>
+        footer={<Button variant="primary" disabled={busy || !dsBotEndpoint.trim() || !dsBotToken.trim()} onClick={() => void connectDsBot()}>
           {L('保存并连接', 'Save and connect')}
         </Button>}>
         <div className="flex flex-col gap-3">
           <p className="text-[13px] text-ink-secondary">{L(
-            '在 DS Bot 的「设置 → MCP 访问」启用本机服务，为 BotArk 创建客户端并选择可访问的 Bot 和群聊。',
-            'Enable MCP access in DS Bot settings. Create a BotArk client and select the bots and groups it can reach.'
+            '支持本机端口（如 8797）或远程 DS Bot MCP 地址（如 https://ds-bot.example.com/mcp 或 192.168.1.10:8797）。在 DS Bot 的「设置 → MCP 访问」创建 BotArk 客户端并填入令牌即可接入；远程连接建议走 HTTPS / Tailscale / SSH 隧道。',
+            'Enter a local port (e.g. 8797) or a remote DS Bot MCP URL (e.g. https://ds-bot.example.com/mcp or 192.168.1.10:8797). Create a BotArk client in DS Bot MCP settings and paste its token; prefer HTTPS, Tailscale, or an SSH tunnel for remote access.'
           )}</p>
-          <Field htmlFor="ds-bot-port" label={L('本机端口', 'Local port')}>
-            <TextInput id="ds-bot-port" type="number" min={1024} max={65535} value={dsBotPort} onChange={(e) => setDsBotPort(e.target.value)} />
+          <Field htmlFor="ds-bot-endpoint" label={L('服务地址或本机端口', 'Endpoint URL or local port')}>
+            <TextInput
+              id="ds-bot-endpoint"
+              type="text"
+              autoComplete="off"
+              placeholder="8797 / https://ds-bot.example.com/mcp"
+              value={dsBotEndpoint}
+              onChange={(e) => setDsBotEndpoint(e.target.value)}
+            />
           </Field>
           <Field htmlFor="ds-bot-token" label={L('客户端令牌', 'Client token')}>
             <TextInput id="ds-bot-token" type="password" autoComplete="off" value={dsBotToken} onChange={(e) => setDsBotToken(e.target.value)} />
