@@ -167,6 +167,10 @@ export interface MuseBridge {
   syncIdentity(accountId: string): Promise<import('./ipc').MuseIdentityView>
   getProxy(accountId: string): Promise<MuseProxyView>
   setProxy(accountId: string, config: MuseProxyConfigInput): Promise<MuseProxyView>
+  testProxy(
+    accountId: string,
+    config?: MuseProxyConfigInput
+  ): Promise<import('./ipc').MuseProxyTestResult>
   listProxyPool(): Promise<MuseProxyPoolItemView[]>
   importProxyPool(
     rawText: string,
@@ -176,6 +180,7 @@ export interface MuseBridge {
   clearProxyPool(): Promise<MuseProxyPoolItemView[]>
   /** `keepIds`: accounts whose current slot is kept but who get no new one. */
   assignProxyPool(accountIds: string[], keepIds?: string[]): Promise<{ assignedCount: number; items: MuseProxyPoolItemView[] }>
+  testProxyPool(ids?: string[]): Promise<Record<string, import('./ipc').MuseProxyTestResult>>
 }
 
 export interface UpdateBridge {

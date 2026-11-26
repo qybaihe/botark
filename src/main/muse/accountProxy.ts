@@ -13,6 +13,8 @@ import { partitionForAccount } from "../webContentsViewManager"
 import { readJsonFile, writeJsonAtomic } from "../jsonFile"
 import { ensureLocalProxyBridge } from "../localProxyBridge"
 import { remoteDnsProxyUrl } from "../proxyUrl"
+import { probeProxyUrl, runWithConcurrency, type ProxyProbeOptions } from "../proxyHealthCheck"
+import type { MuseProxyTestResult } from "@shared/ipc"
 import { createMutex, planPoolAssignment, releasePoolSlot } from "@shared/proxyPool"
 
 /** One lock for both proxy files: every change is read-modify-write across awaits. */
@@ -626,6 +628,69 @@ export async function releaseProxyPoolAccount(accountId: string): Promise<void> 
     for (const slot of held) await clearPoolConfigUnlocked(accountId, slot)
     writePoolStore(releasePoolSlot(pool, accountId))
   })
+}
+
+/**
+ * Test connectivity & latency for an account's saved proxy or an unsaved draft config.
+ * When `draft` omits `password` for the same proxy identity already saved on `accountId`,
+ * the stored password is reused in memory without returning it to the renderer.
+ */
+export async function testAccountProxy(
+  accountId: string,
+  draft?: MuseProxyConfig,
+  opts?: ProxyProbeOptions
+): Promise<MuseProxyTestResult> {
+  try {
+    let resolved: MuseProxyConfig
+    if (draft) {
+      resolved = normalize(draft)
+      if (resolved.mode !== "direct" && !resolved.password) {
+        const prev = await loadProxyConfig(accountId).catch(() => null)
+        if (prev?.password && proxyIdentity(prev) === proxyIdentity(resolved)) {
+          resolved = { ...resolved, password: prev.password }
+        }
+      }
+    } else {
+      resolved = await loadProxyConfig(accountId)
+    }
+    const proxyUrl = buildAccountProxyUrl(resolved) ?? undefined
+    return await probeProxyUrl(proxyUrl, opts)
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+      checkedAt: Date.now()
+    }
+  }
+}
+
+/**
+ * Test availability & latency for all (or selected) items in the encrypted proxy pool.
+ */
+export async function testProxyPoolItems(
+  ids?: readonly string[],
+  opts?: ProxyProbeOptions
+): Promise<Record<string, MuseProxyTestResult>> {
+  const pool = readPoolStore()
+  const filter = ids && ids.length > 0 ? new Set(ids) : null
+  const targets = filter ? pool.filter((item) => filter.has(item.id)) : pool
+  const entries = await runWithConcurrency(targets, async (slot) => {
+    const cfg = await decryptPoolItem(slot)
+    if (!cfg || cfg.mode === "direct" || !cfg.host || !cfg.port) {
+      return [
+        slot.id,
+        {
+          ok: false,
+          error: "代理配置无法解密或无效（请检查系统钥匙串）",
+          checkedAt: Date.now()
+        } satisfies MuseProxyTestResult
+      ] as const
+    }
+    const proxyUrl = buildAccountProxyUrl(cfg) ?? undefined
+    const result = await probeProxyUrl(proxyUrl, opts)
+    return [slot.id, result] as const
+  })
+  return Object.fromEntries(entries)
 }
 
 /**

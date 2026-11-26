@@ -98,11 +98,13 @@ export const MUSE_CHANNELS = {
   syncIdentity: 'bothub:muse:identity:sync',
   getProxy: 'bothub:muse:proxy:get',
   setProxy: 'bothub:muse:proxy:set',
+  testProxy: 'bothub:muse:proxy:test',
   listProxyPool: 'bothub:muse:proxy-pool:list',
   importProxyPool: 'bothub:muse:proxy-pool:import',
   removeProxyPoolItem: 'bothub:muse:proxy-pool:remove',
   clearProxyPool: 'bothub:muse:proxy-pool:clear',
-  assignProxyPool: 'bothub:muse:proxy-pool:assign'
+  assignProxyPool: 'bothub:muse:proxy-pool:assign',
+  testProxyPool: 'bothub:muse:proxy-pool:test'
 } as const
 
 export interface MuseEnsureRequest {
@@ -310,6 +312,22 @@ export interface MuseProxyPoolItemView {
   username?: string
   hasPassword: boolean
   assignedAccountId?: string
+}
+
+export interface MuseProxyTestResult {
+  ok: boolean
+  /** Round-trip latency in milliseconds when reachable. */
+  latencyMs?: number
+  /** HTTP status received from the probe endpoint. */
+  statusCode?: number
+  /** Detected egress IP when returned by the probe endpoint. */
+  exitIp?: string
+  /** Detected 2-letter country/region code (e.g. US, JP, SG). */
+  country?: string
+  /** Concise error reason when `ok === false`. */
+  error?: string
+  /** Timestamp (epoch ms) when the check finished. */
+  checkedAt: number
 }
 
 export interface MuseIdentityView {

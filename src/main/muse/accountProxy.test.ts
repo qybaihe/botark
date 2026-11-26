@@ -43,7 +43,9 @@ const {
   parseProxyLine,
   ProxyConfigUnreadableError,
   releaseProxyPoolAccount,
-  saveProxyConfig
+  saveProxyConfig,
+  testAccountProxy,
+  testProxyPoolItems
 } = await import('./accountProxy')
 
 afterAll(async () => {
@@ -220,5 +222,46 @@ describe('saved credentials and pool ownership', () => {
     await releaseProxyPoolAccount('pool-manual')
     expect((await listProxyPool())[0]?.assignedAccountId).toBeUndefined()
     expect(await loadProxyConfig('pool-manual')).toMatchObject({ host: 'manual.example.com', port: 9999 })
+  })
+
+  it('tests account proxy drafts reusing saved encrypted password and fails closed on unreadable config', async () => {
+    await saveProxyConfig('probe-acc', {
+      mode: 'http',
+      host: 'proxy.example.com',
+      port: 8080,
+      username: 'alice',
+      password: 'saved-secret'
+    })
+    const seenProxyUrls: Array<string | undefined> = []
+    const fetchImpl = vi.fn(async (proxyUrl: string | undefined) => {
+      seenProxyUrls.push(proxyUrl)
+      return new Response('ip=198.51.100.9\nloc=SG\n', { status: 200 })
+    })
+
+    const draftResult = await testAccountProxy(
+      'probe-acc',
+      { mode: 'http', host: 'proxy.example.com', port: 8080, username: 'alice', password: '' },
+      { probeUrls: ['https://www.cloudflare.com/cdn-cgi/trace'], fetchImpl }
+    )
+    expect(draftResult.ok).toBe(true)
+    expect(draftResult.country).toBe('SG')
+    expect(draftResult.exitIp).toBe('198.51.100.9')
+    expect(seenProxyUrls).toEqual(['http://alice:saved-secret@proxy.example.com:8080'])
+
+    // Unreadable stored proxy fails closed cleanly in testAccountProxy.
+    const unreadable = await testAccountProxy('acc1', undefined, { fetchImpl })
+    expect(unreadable.ok).toBe(false)
+    expect(unreadable.error).toContain('代理配置无法读取')
+
+    // Batch pool probe tests all pool entries with decrypted credentials.
+    const imported = await importProxyPool('socks5://u:p@10.0.0.1:1080\nhttp://10.0.0.2:7890')
+    const poolRes = await testProxyPoolItems(undefined, {
+      probeUrls: ['https://www.cloudflare.com/cdn-cgi/trace'],
+      fetchImpl
+    })
+    expect(Object.keys(poolRes)).toEqual(imported.items.map((i) => i.id))
+    expect(Object.values(poolRes).every((r) => r.ok)).toBe(true)
+    expect(seenProxyUrls).toContain('socks5://u:p@10.0.0.1:1080')
+    expect(seenProxyUrls).toContain('http://10.0.0.2:7890')
   })
 })

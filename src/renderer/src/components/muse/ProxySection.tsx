@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ShieldCheck } from 'lucide-react'
-import type { MuseProxyMode, MuseProxyView } from '@shared/ipc'
+import { Activity, CheckCircle2, Loader2, ShieldCheck, XCircle } from 'lucide-react'
+import type { MuseProxyMode, MuseProxyTestResult, MuseProxyView } from '@shared/ipc'
 import { EmptyLine, Section } from '@/components/info/Section'
 import { Button } from '@/components/ui/Button'
 import { TextInput } from '@/components/ui/Field'
@@ -154,6 +154,8 @@ export function ProxySection({ accountId }: { accountId: string }) {
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<MuseProxyTestResult | null>(null)
   const [error, setError] = useState<string>()
   const [hint, setHint] = useState<string>()
 
@@ -165,6 +167,7 @@ export function ProxySection({ accountId }: { accountId: string }) {
     }
     setLoading(true)
     setError(undefined)
+    setTestResult(null)
     try {
       const next = await muse.getProxy(accountId)
       setView(next)
@@ -185,6 +188,7 @@ export function ProxySection({ accountId }: { accountId: string }) {
   }, [refresh])
 
   const handleHostChange = (rawValue: string) => {
+    setTestResult(null)
     const fallback: Exclude<MuseProxyMode, 'direct'> = mode === 'direct' ? 'http' : mode
     if (rawValue.includes('://') || rawValue.includes('@') || (rawValue.split(':').length >= 2 && /:\d+/.test(rawValue))) {
       const parsed = parseInlineProxyInput(rawValue, fallback)
@@ -200,6 +204,34 @@ export function ProxySection({ accountId }: { accountId: string }) {
     setHost(rawValue)
   }
 
+  const buildDraftInput = () => ({
+    mode,
+    host: host.trim() || undefined,
+    port: port.trim() ? Number(port) : mode === 'https' ? 443 : undefined,
+    username: username.trim() || undefined,
+    password: password || undefined
+  })
+
+  const runTest = async () => {
+    const muse = getBridge()?.muse
+    if (!muse?.testProxy) return
+    setTesting(true)
+    setError(undefined)
+    setTestResult(null)
+    try {
+      const res = await muse.testProxy(accountId, buildDraftInput())
+      setTestResult(res)
+    } catch (err) {
+      setTestResult({
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+        checkedAt: Date.now()
+      })
+    } finally {
+      setTesting(false)
+    }
+  }
+
   const save = async () => {
     const muse = getBridge()?.muse
     if (!muse?.setProxy) return
@@ -207,13 +239,7 @@ export function ProxySection({ accountId }: { accountId: string }) {
     setError(undefined)
     setHint(undefined)
     try {
-      const next = await muse.setProxy(accountId, {
-        mode,
-        host: host.trim() || undefined,
-        port: port.trim() ? Number(port) : mode === 'https' ? 443 : undefined,
-        username: username.trim() || undefined,
-        password: password || undefined
-      })
+      const next = await muse.setProxy(accountId, buildDraftInput())
       setView(next)
       setMode(next.mode)
       setHost(next.host || '')
@@ -259,6 +285,7 @@ export function ProxySection({ accountId }: { accountId: string }) {
             value={mode}
             onValueChange={(next) => {
               setMode(next)
+              setTestResult(null)
               if (next === 'https' && !port.trim()) setPort('443')
             }}
             options={MODES.map((m) => ({ value: m.value, label: m.label() }))}
@@ -279,14 +306,24 @@ export function ProxySection({ accountId }: { accountId: string }) {
                 <span className="font-medium text-ink">{t('Port')}</span>
                 <TextInput
                   value={port}
-                  onChange={(e) => setPort(e.target.value)}
+                  onChange={(e) => {
+                    setPort(e.target.value)
+                    setTestResult(null)
+                  }}
                   placeholder={mode === 'https' ? '443' : '7890'}
                 />
               </label>
             </div>
             <label className="flex flex-col gap-1 text-[12px]">
               <span className="font-medium text-ink">{t('Username (optional)')}</span>
-              <TextInput value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="off" />
+              <TextInput
+                value={username}
+                onChange={(e) => {
+                  setUsername(e.target.value)
+                  setTestResult(null)
+                }}
+                autoComplete="off"
+              />
             </label>
             <label className="flex flex-col gap-1 text-[12px]">
               <span className="font-medium text-ink">
@@ -296,16 +333,70 @@ export function ProxySection({ accountId }: { accountId: string }) {
               <TextInput
                 type="password"
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                onChange={(e) => {
+                  setPassword(e.target.value)
+                  setTestResult(null)
+                }}
                 placeholder={view?.hasPassword ? t('Leave blank to keep') : ''}
                 autoComplete="new-password"
               />
             </label>
           </>
         )}
-        <Button size="sm" variant="secondary" disabled={saving} onClick={() => void save()}>
-          {t('Save proxy')}
-        </Button>
+        {testResult && (
+          <div
+            className={
+              testResult.ok
+                ? 'flex items-center gap-1.5 rounded-lg border border-status-online/30 bg-status-online/10 px-2.5 py-1.5 text-[11.5px] text-status-online-ink'
+                : 'flex items-start gap-1.5 rounded-lg border border-status-error/30 bg-status-error/10 px-2.5 py-1.5 text-[11.5px] text-status-error'
+            }
+          >
+            {testResult.ok ? (
+              <CheckCircle2 className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+            ) : (
+              <XCircle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+            )}
+            <span className="min-w-0 break-words">
+              {testResult.ok
+                ? [
+                    mode === 'direct' ? '直连可用' : '代理可用',
+                    typeof testResult.latencyMs === 'number' ? `${testResult.latencyMs} ms` : null,
+                    testResult.country,
+                    testResult.exitIp
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')
+                : `不可用：${testResult.error || '连接失败'}`}
+            </span>
+          </div>
+        )}
+        <div className="flex items-center gap-1.5">
+          {getBridge()?.muse?.testProxy && (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={testing || saving}
+              onClick={() => void runTest()}
+              className="flex-1"
+            >
+              {testing ? (
+                <Loader2 className="size-3.5 animate-spin" aria-hidden />
+              ) : (
+                <Activity className="size-3.5" aria-hidden />
+              )}
+              {testing ? '检测中…' : '测试延迟'}
+            </Button>
+          )}
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={saving || testing}
+            onClick={() => void save()}
+            className="flex-1"
+          >
+            {t('Save proxy')}
+          </Button>
+        </div>
       </div>
     </Section>
   )

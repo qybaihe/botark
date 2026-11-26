@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react'
-import { FileUp, Shuffle, Trash2 } from 'lucide-react'
-import type { MuseProxyMode, MuseProxyPoolItemView, MuseProxyView } from '@shared/ipc'
+import { Activity, FileUp, Loader2, Shuffle, Trash2 } from 'lucide-react'
+import type { MuseProxyMode, MuseProxyPoolItemView, MuseProxyTestResult, MuseProxyView } from '@shared/ipc'
 import { keepMuseBatchProxyAssignments } from '@/components/add-bot/MuseBatchImport'
 import { Button } from '@/components/ui/Button'
 import { Select } from '@/components/ui/Select'
@@ -124,11 +124,95 @@ export function ProxyPoolSection({
   const { pool, setPool, refresh, assignMuseProxies } = proxyPool
   const [rawProxyText, setRawProxyText] = useState('')
   const [defaultMode, setDefaultMode] = useState<Exclude<MuseProxyMode, 'direct'>>('socks5')
+  const [testResults, setTestResults] = useState<Record<string, MuseProxyTestResult>>({})
+  const [testingIds, setTestingIds] = useState<Set<string>>(() => new Set())
+  const [testingAll, setTestingAll] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
 
-  useLayoutEffect(() => setRawProxyText(''), [credentialRevision])
+  useLayoutEffect(() => {
+    setRawProxyText('')
+    setTestResults({})
+    setTestingIds(new Set())
+    setTestingAll(false)
+  }, [credentialRevision])
 
   if (!active) return null
+
+  const latencyBadgeClass = (ms: number | undefined): string => {
+    if (typeof ms !== 'number') return 'bg-status-online/10 text-status-online-ink'
+    if (ms < 300) return 'bg-status-online/10 text-status-online-ink'
+    if (ms < 800) return 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+    return 'bg-orange-500/15 text-orange-600 dark:text-orange-400'
+  }
+
+  const handleTestPool = async (ids?: string[]) => {
+    const muse = getBridge()?.muse
+    if (!muse?.testProxyPool || pool.length === 0) return
+    const targetIds = ids && ids.length > 0 ? ids : pool.map((item) => item.id)
+    const isAll = !ids || ids.length === 0
+    if (isAll) setTestingAll(true)
+    setTestingIds((prev) => {
+      const next = new Set(prev)
+      for (const id of targetIds) next.add(id)
+      return next
+    })
+    setError(undefined)
+    if (isAll) setHint(undefined)
+    try {
+      const res = await muse.testProxyPool(isAll ? undefined : targetIds)
+      setTestResults((prev) => ({ ...prev, ...res }))
+      if (isAll) {
+        const values = Object.values(res)
+        const okValues = values.filter((r) => r.ok)
+        const avgMs =
+          okValues.length > 0
+            ? Math.round(
+                okValues.reduce((sum, r) => sum + (r.latencyMs ?? 0), 0) / okValues.length
+              )
+            : null
+        setHint(
+          avgMs !== null
+            ? `代理检测完成：${okValues.length} / ${values.length} 可用（平均延迟 ${avgMs} ms）`
+            : `代理检测完成：0 / ${values.length} 可用`
+        )
+      }
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      if (isAll) setTestingAll(false)
+      setTestingIds((prev) => {
+        const next = new Set(prev)
+        for (const id of targetIds) next.delete(id)
+        return next
+      })
+    }
+  }
+
+  const failedIds = pool.filter((item) => testResults[item.id]?.ok === false).map((item) => item.id)
+
+  const handleRemoveFailed = async () => {
+    const muse = getBridge()?.muse
+    if (!muse?.removeProxyPoolItem || failedIds.length === 0) return
+    setBusy(true)
+    setError(undefined)
+    try {
+      let next = pool
+      for (const id of failedIds) {
+        next = await muse.removeProxyPoolItem(id)
+      }
+      setPool(next)
+      setTestResults((prev) => {
+        const copy = { ...prev }
+        for (const id of failedIds) delete copy[id]
+        return copy
+      })
+      setHint(`已移除 ${failedIds.length} 个失效代理`)
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const handleImportPool = async () => {
     const muse = getBridge()?.muse
@@ -163,6 +247,12 @@ export function ProxyPoolSection({
     if (!muse?.removeProxyPoolItem) return
     const next = await muse.removeProxyPoolItem(id)
     setPool(next)
+    setTestResults((prev) => {
+      if (!(id in prev)) return prev
+      const copy = { ...prev }
+      delete copy[id]
+      return copy
+    })
   }
 
   const handleClearPool = async () => {
@@ -170,6 +260,7 @@ export function ProxyPoolSection({
     if (!muse?.clearProxyPool) return
     const next = await muse.clearProxyPool()
     setPool(next)
+    setTestResults({})
     setHint('已清空代理池')
   }
 
@@ -259,12 +350,39 @@ export function ProxyPoolSection({
 
       {/* Current Pool List */}
       <div className="overflow-hidden rounded-2xl border border-line bg-surface shadow-soft">
-        <div className="flex items-center justify-between border-b border-line bg-sunken/40 px-4 py-2.5 text-[12px] font-medium text-ink-secondary">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-sunken/40 px-4 py-2.5 text-[12px] font-medium text-ink-secondary">
           <span>代理池列表 ({pool.length})</span>
           {pool.length > 0 && (
-            <Button size="sm" variant="ghost" onClick={() => void handleClearPool()}>
-              清空代理池
-            </Button>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {getBridge()?.muse?.testProxyPool && (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={busy || testingAll}
+                  onClick={() => void handleTestPool()}
+                >
+                  {testingAll ? (
+                    <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                  ) : (
+                    <Activity className="size-3.5" aria-hidden />
+                  )}
+                  {testingAll ? '测速中…' : '全部测速'}
+                </Button>
+              )}
+              {failedIds.length > 0 && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={busy || testingAll}
+                  onClick={() => void handleRemoveFailed()}
+                >
+                  移除失效 ({failedIds.length})
+                </Button>
+              )}
+              <Button size="sm" variant="ghost" disabled={busy || testingAll} onClick={() => void handleClearPool()}>
+                清空代理池
+              </Button>
+            </div>
           )}
         </div>
         {pool.length === 0 ? (
@@ -275,6 +393,19 @@ export function ProxyPoolSection({
               const assignedAcc = item.assignedAccountId ? accounts[item.assignedAccountId] : undefined
               const ownerBot = item.assignedAccountId
                 ? botsByAccountId.get(item.assignedAccountId)?.[0]
+                : undefined
+              const probe = testResults[item.id]
+              const isTestingItem = testingIds.has(item.id)
+              const probeTooltip = probe
+                ? probe.ok
+                  ? [
+                      typeof probe.latencyMs === 'number' ? `延迟 ${probe.latencyMs} ms` : null,
+                      probe.country ? `地区 ${probe.country}` : null,
+                      probe.exitIp ? `出口 IP ${probe.exitIp}` : null
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')
+                  : probe.error || '代理不可用'
                 : undefined
               return (
                 <li key={item.id} className="flex items-center justify-between gap-3 px-4 py-2.5 text-[13px]">
@@ -289,6 +420,29 @@ export function ProxyPoolSection({
                     </span>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
+                    {isTestingItem ? (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-sunken px-2 py-0.5 text-[11px] text-ink-muted">
+                        <Loader2 className="size-3 animate-spin" aria-hidden />
+                        检测中…
+                      </span>
+                    ) : probe ? (
+                      probe.ok ? (
+                        <span
+                          title={probeTooltip}
+                          className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-mono text-[11px] font-medium ${latencyBadgeClass(probe.latencyMs)}`}
+                        >
+                          {typeof probe.latencyMs === 'number' ? `${probe.latencyMs} ms` : '可用'}
+                          {probe.country ? ` · ${probe.country}` : ''}
+                        </span>
+                      ) : (
+                        <span
+                          title={probeTooltip}
+                          className="inline-flex items-center rounded-full bg-status-error/10 px-2 py-0.5 text-[11px] font-medium text-status-error"
+                        >
+                          不可用
+                        </span>
+                      )
+                    ) : null}
                     {assignedAcc || ownerBot ? (
                       <span className="inline-flex items-center gap-1.5 rounded-full bg-status-online/10 px-2.5 py-0.5 text-[11.5px] font-medium text-status-online-ink">
                         已绑定 → {ownerBot?.name || assignedAcc?.displayName || item.assignedAccountId}
@@ -297,6 +451,17 @@ export function ProxyPoolSection({
                       <span className="rounded-full bg-sunken px-2.5 py-0.5 text-[11.5px] text-ink-muted">
                         空闲待分配
                       </span>
+                    )}
+                    {getBridge()?.muse?.testProxyPool && (
+                      <button
+                        type="button"
+                        disabled={isTestingItem || testingAll}
+                        onClick={() => void handleTestPool([item.id])}
+                        className="rounded p-1 text-ink-muted hover:bg-hover hover:text-ink disabled:opacity-40"
+                        title="测试可用性与延迟"
+                      >
+                        <Activity className="size-3.5" />
+                      </button>
                     )}
                     <button
                       type="button"

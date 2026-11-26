@@ -99,12 +99,14 @@ const bridge: BotHubBridge = {
     syncIdentity: (accountId) => ipcRenderer.invoke(MUSE_CHANNELS.syncIdentity, accountId),
     getProxy: (accountId) => ipcRenderer.invoke(MUSE_CHANNELS.getProxy, accountId),
     setProxy: (accountId, config) => ipcRenderer.invoke(MUSE_CHANNELS.setProxy, accountId, config),
+    testProxy: (accountId, config) => ipcRenderer.invoke(MUSE_CHANNELS.testProxy, accountId, config),
     listProxyPool: () => ipcRenderer.invoke(MUSE_CHANNELS.listProxyPool),
     importProxyPool: (rawText, defaultMode) =>
       ipcRenderer.invoke(MUSE_CHANNELS.importProxyPool, rawText, defaultMode),
     removeProxyPoolItem: (id) => ipcRenderer.invoke(MUSE_CHANNELS.removeProxyPoolItem, id),
     clearProxyPool: () => ipcRenderer.invoke(MUSE_CHANNELS.clearProxyPool),
-    assignProxyPool: (accountIds, keepIds) => ipcRenderer.invoke(MUSE_CHANNELS.assignProxyPool, accountIds, keepIds)
+    assignProxyPool: (accountIds, keepIds) => ipcRenderer.invoke(MUSE_CHANNELS.assignProxyPool, accountIds, keepIds),
+    testProxyPool: (ids) => ipcRenderer.invoke(MUSE_CHANNELS.testProxyPool, ids)
   },
   updates: {
     check: () => ipcRenderer.invoke(UPDATE_CHANNELS.check),
