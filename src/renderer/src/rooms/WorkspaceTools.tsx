@@ -25,6 +25,7 @@ import type {
   WorkspaceTool,
   WorkspaceView
 } from '@shared/workspace'
+import type { PortalState } from '@shared/workspacePortal'
 import { ArkMcpNodeSvg, ArkWorkspaceVaultSvg } from '@/components/ui/ArkGlyphs'
 import { Button } from '@/components/ui/Button'
 import { SwitchPill } from '@/components/ui/Controls'
@@ -730,11 +731,34 @@ function WorkspaceStudioBody({
   const [hint, setHint] = useState('')
   const [busy, setBusy] = useState(false)
 
+  const portalBridge = getBridge()?.workspacePortal
+  const [portalState, setPortalState] = useState<PortalState | undefined>()
   const [formOpen, setFormOpen] = useState(false)
   const [editingServer, setEditingServer] = useState<WorkspaceServerView | undefined>()
   const [pasteOpen, setPasteOpen] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [expandedError, setExpandedError] = useState<string | null>(null)
+
+  const refreshPortal = useCallback(() => {
+    if (!portalBridge) return
+    void portalBridge
+      .manage({ op: 'status', scope })
+      .then((next) => setPortalState(next))
+      .catch(() => setPortalState(undefined))
+  }, [portalBridge, scope])
+
+  useEffect(() => {
+    refreshPortal()
+  }, [refreshPortal, state?.directory])
+
+  useEffect(() => {
+    const onPortalUpdated = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ scope?: string }>).detail
+      if (!detail?.scope || detail.scope === scope) refreshPortal()
+    }
+    window.addEventListener('botark:workspace-portal-updated', onPortalUpdated)
+    return () => window.removeEventListener('botark:workspace-portal-updated', onPortalUpdated)
+  }, [refreshPortal, scope])
 
   useEffect(() => {
     onModalOpenChange?.(formOpen || pasteOpen)
@@ -977,6 +1001,32 @@ function WorkspaceStudioBody({
               <CheckCircle2 className="size-3 text-status-online" />
               {L('工作区已就绪，可以开始对话。', 'Workspace ready. You can start chatting.')}
             </p>
+
+            {portalState?.running && portalBridge && (
+              <div className="flex items-center justify-between gap-2 rounded-lg border border-line/80 bg-surface/70 px-2 py-1.5 text-[11px]">
+                <span className="flex min-w-0 items-center gap-1.5 text-ink-secondary">
+                  <span className="size-1.5 shrink-0 rounded-full bg-status-online" />
+                  <span className="truncate">
+                    {L('Hark 临时门户运行中（空闲自动关闭）', 'Hark temp portal active (auto-closes when idle)')}
+                  </span>
+                </span>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={busy}
+                  onClick={() =>
+                    void act(async () => {
+                      const closed = await portalBridge.manage({ op: 'close', scope })
+                      setPortalState(closed)
+                      setHint(L('已关闭 Hark 临时工作区门户', 'Closed Hark temporary workspace portal'))
+                    })
+                  }
+                  className="h-5 shrink-0 px-2 text-[10.5px]"
+                >
+                  {L('关闭门户', 'Close')}
+                </Button>
+              </div>
+            )}
           </div>
         ) : (
           <div className="flex flex-wrap items-center justify-between gap-2">

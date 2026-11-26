@@ -12,6 +12,7 @@ import {
   freshRoomSession,
   mentions,
   normalizeMentionName,
+  refusesRoomFrame,
   roomRecipient,
   turnPrompt,
   type CollabRoom,
@@ -589,6 +590,30 @@ export function moveMemberToRoom(
   return { ok: true }
 }
 
+/**
+ * Publish the workspace over HTTP so a member that refuses the external
+ * `[TOOL]` protocol can still read and write it with its own web tools.
+ * Returns the prompt fragment to append, or an empty string when the portal
+ * could not be started (or no workspace directory is bound).
+ */
+async function openWorkspacePortal(scope: string): Promise<string> {
+  const bridge = getBridge()?.workspacePortal
+  if (!bridge) return ''
+  try {
+    const state = await bridge.manage({ op: 'open', scope })
+    if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function' && typeof CustomEvent === 'function') {
+      window.dispatchEvent(new CustomEvent('botark:workspace-portal-updated', { detail: { scope } }))
+    }
+    if (!state.running || !state.entryUrl) return ''
+    return (
+      `\n\n本机工作区已挂载为在线文档：${state.entryUrl}\n` +
+      '需要查看、搜索或修改工作区时，用你的网页抓取工具打开这个地址，按页面上的说明操作即可。'
+    )
+  } catch {
+    return ''
+  }
+}
+
 async function memberReply(room: CollabRoom, member: RoomMember, trigger: RoomMessage, signal: AbortSignal) {
   const adapter = adapterRegistry.get(member.platform)
   const bot = useBotStore
@@ -661,13 +686,18 @@ async function memberReply(room: CollabRoom, member: RoomMember, trigger: RoomMe
       }))
     const contextMember = member.sessionId || hermesSessionKey ? member : { ...member, cursor: 0 }
     let prompt = turnPrompt(room, contextMember, trigger)
-    const hub = getBridge()?.workspace
-    const workspace = hub && member.platform !== 'hark' ? await hub.manage(room.id, { op: 'status' }) : undefined
-    if (workspace?.tools.length) {
-      prompt +=
-        '\n\nTo request one workspace tool, reply with [TOOL] followed by JSON {"name":"…","args":{…}}. A person approves each call. ' +
-        'Use paths relative to the workspace directory and use "." for the workspace root. Available tools: ' +
-        JSON.stringify(workspace.tools.map((t) => ({ name: t.name, description: t.description, schema: t.inputSchema })))
+    if (refusesRoomFrame(member.platform)) {
+      const portal = await openWorkspacePortal(room.id)
+      if (portal) prompt += portal
+    } else {
+      const hub = getBridge()?.workspace
+      const workspace = hub ? await hub.manage(room.id, { op: 'status' }) : undefined
+      if (workspace?.tools.length) {
+        prompt +=
+          '\n\nTo request one workspace tool, reply with [TOOL] followed by JSON {"name":"…","args":{…}}. A person approves each call. ' +
+          'Use paths relative to the workspace directory and use "." for the workspace root. Available tools: ' +
+          JSON.stringify(workspace.tools.map((t) => ({ name: t.name, description: t.description, schema: t.inputSchema })))
+      }
     }
     signal.throwIfAborted()
     signal.addEventListener('abort', cancel, { once: true })

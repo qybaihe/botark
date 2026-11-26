@@ -7,7 +7,10 @@
 //                       or (APPLE_API_KEY + APPLE_API_KEY_ID + APPLE_API_ISSUER)
 //                       or (APPLE_KEYCHAIN_PROFILE [+ APPLE_KEYCHAIN])
 //   Windows:               WIN_CSC_LINK, WIN_CSC_KEY_PASSWORD
+const { existsSync } = require('node:fs')
+const { join } = require('node:path')
 const has = (name) => Boolean(process.env[name] && process.env[name].trim())
+const hasBundledTunnelBin = existsSync(join(__dirname, 'resources', 'bin'))
 const macSigned = has('CSC_LINK') || has('CSC_NAME') || process.env.APPLE_SIGN === '1'
 const notarizeByAppleId =
   has('APPLE_ID') && has('APPLE_APP_SPECIFIC_PASSWORD') && has('APPLE_TEAM_ID')
@@ -33,6 +36,21 @@ module.exports = {
     buildResources: 'build'
   },
   files: ['out/**/*', 'package.json'],
+  // cloudflared publishes the workspace portal on a public https URL so a
+  // member that refuses BotArk's `[TOOL]` protocol can still reach the local
+  // workspace with its own web tools. Ship unpacked when present locally/in CI
+  // (skipped gracefully on clean checkouts without resources/bin).
+  ...(hasBundledTunnelBin
+    ? {
+        extraResources: [
+          {
+            from: 'resources/bin',
+            to: 'bin',
+            filter: ['**/*']
+          }
+        ]
+      }
+    : {}),
   asar: true,
   protocols: [
     {

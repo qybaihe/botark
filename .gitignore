@@ -14,6 +14,7 @@ hold-*.mjs
 *.bak
 *.local
 .tmp-screenshots/
+resources/bin/
 xcuserdata/
 DerivedData/
 *.xcresult

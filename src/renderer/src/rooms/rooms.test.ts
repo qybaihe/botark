@@ -768,3 +768,42 @@ it('retains the confirmed v0.14 final when starting the next brief after hydrati
   await submitBrief('room', '@Dot update')
   expect(useRooms.getState().rooms[0]?.messages[0]?.final).toBe(true)
 })
+
+it('gives Hark a plain assistant frame plus the hardened workspace portal instead of [TOOL] instructions', async () => {
+  const manage = vi.fn().mockResolvedValue({ tools: [{ name: 'read', inputSchema: { type: 'object' } }] })
+  const portal = vi.fn().mockResolvedValue({
+    running: true,
+    publicUrl: 'https://portal.example.trycloudflare.com',
+    entryUrl: 'https://portal.example.trycloudflare.com/?token=abc',
+    tools: []
+  })
+  vi.stubGlobal('window', {
+    electron: {
+      workspace: { manage, run: vi.fn() },
+      workspacePortal: { manage: portal },
+      hark: { rpc: vi.fn().mockResolvedValue({ ok: true, data: { conversationId: 'hark-conv-1' } }) }
+    }
+  })
+  const sentPrompts: string[] = []
+  fixture(
+    'manual',
+    async (msg) => {
+      sentPrompts.push(msg.text)
+      return '收到，已通过工作区门户读取资料。'
+    },
+    4,
+    [{ name: 'HarkBot', botId: 'hark-bot', platform: 'hark' as const, accountId: 'acc-hark', cursor: 0 }]
+  )
+
+  await submitBrief('room', '@HarkBot 帮忙总结一下当前工作区')
+  expect(sentPrompts).toHaveLength(1)
+  const prompt = sentPrompts[0]!
+  expect(prompt).not.toContain('[TOOL]')
+  expect(prompt).not.toContain('Collaboration room:')
+  expect(prompt).not.toContain('Members:')
+  expect(prompt).not.toContain('Human brief:')
+  expect(prompt).toContain('Please help with the user’s request')
+  expect(prompt).toContain('https://portal.example.trycloudflare.com/?token=abc')
+  expect(portal).toHaveBeenCalledWith({ op: 'open', scope: 'room' })
+  expect(manage).not.toHaveBeenCalled()
+})

@@ -1,5 +1,6 @@
 import type { SlackBridge } from './slack'
 import type { WorkspaceBridge } from './workspace'
+import type { PortalBridge } from './workspacePortal'
 import type { MuseAutoLoginRequest, MuseAutoLoginResult } from './museBatch'
 import type {
   CreateWebViewRequest,
@@ -294,5 +295,6 @@ export interface BotHubBridge {
   readonly mobileSync?: MobileSyncBridge
   readonly slack?: SlackBridge
   readonly workspace?: WorkspaceBridge
+  readonly workspacePortal?: PortalBridge
   readonly vault?: VaultBridge
 }

@@ -1,5 +1,6 @@
 import { registerSlackIpc, stopSlack } from './slack/slackIpc'
 import { registerWorkspaceIpc, stopWorkspaces } from './mcp/hub'
+import { registerWorkspacePortalIpc, stopWorkspacePortals } from './mcp/workspacePortal'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { app, autoUpdater, BrowserWindow, shell } from 'electron'
@@ -231,6 +232,7 @@ app.on('before-quit', (event) => {
   const cleanup = Promise.allSettled([
     stopSlack(),
     stopWorkspaces(),
+    stopWorkspacePortals(),
     stopMobileSyncServer(),
     closeAllLocalProxyBridges()
   ])
@@ -261,6 +263,7 @@ app.whenReady().then(async () => {
   registerMobileSyncIpc()
   registerVaultIpc()
   registerWorkspaceIpc(() => mainWindow)
+  registerWorkspacePortalIpc(() => mainWindow)
   registerSlackIpc(() => mainWindow)
   mainWindow = createMainWindow()
   readyForDeepLinks = true

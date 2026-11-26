@@ -1,5 +1,6 @@
 import { SLACK_CHANNEL, SLACK_INBOUND, type SlackInbound } from '@shared/slack'
 import { WORKSPACE_CHANNEL } from '@shared/workspace'
+import { WORKSPACE_PORTAL_CHANNEL } from '@shared/workspacePortal'
 import { contextBridge, ipcRenderer } from 'electron'
 import type { BotHubBridge } from '@shared/bridge'
 import {
@@ -206,6 +207,9 @@ const bridge: BotHubBridge = {
   workspace: {
     manage: (scope, request) => ipcRenderer.invoke(WORKSPACE_CHANNEL, scope, request),
     run: (scope, tool, args, recipient) => ipcRenderer.invoke(WORKSPACE_CHANNEL, scope, { op: 'run', tool, args, recipient })
+  },
+  workspacePortal: {
+    manage: (request) => ipcRenderer.invoke(WORKSPACE_PORTAL_CHANNEL, request)
   },
   mobileSync: {
     getState: () => ipcRenderer.invoke(MOBILE_SYNC_CHANNELS.getState),

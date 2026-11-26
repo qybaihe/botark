@@ -312,6 +312,44 @@ async function approve(win: BrowserWindow, message: string, detail: string) {
   if (choice.response !== 1) throw new Error('用户已取消本次操作')
 }
 
+const rootChangeListeners = new Set<(scopeId: string) => void>()
+
+export function onWorkspaceRootChanged(listener: (scopeId: string) => void): () => void {
+  rootChangeListeners.add(listener)
+  return () => {
+    rootChangeListeners.delete(listener)
+  }
+}
+
+function notifyWorkspaceRootChanged(scopeId: string): void {
+  for (const listener of rootChangeListeners) {
+    try {
+      listener(scopeId)
+    } catch {
+      /* ignore listener errors */
+    }
+  }
+}
+
+/**
+ * The workspace root bound to a scope, if any. The workspace portal uses it
+ * to serve the same directory the `[TOOL]` protocol would reach.
+ */
+export function workspaceRootFor(scopeId: string): string | undefined {
+  const binding = scopes.get((scopeId || '').trim() || GLOBAL_SCOPE)
+  return binding?.root
+}
+
+/**
+ * Same as {@link workspaceRootFor} but waits for the persisted scope state to
+ * be loaded first, so a caller that runs right after startup still sees the
+ * directory the user bound earlier.
+ */
+export async function resolveWorkspaceRootFor(scopeId: string): Promise<string | undefined> {
+  await ensureHydrated()
+  return workspaceRootFor(scopeId)
+}
+
 async function invoke(
   win: BrowserWindow,
   scopeId: string,
@@ -1155,19 +1193,21 @@ async function bindDirectory(
     throw new Error(`所选路径不是有效目录：${rawDir}`)
   }
 
-  const { binding, restarting, stopped, revision } = await withStateLock(async () => {
+  const { binding, restarting, stopped, revision, rootChanged } = await withStateLock(async () => {
     assertCurrent()
     const binding = getOrCreateBinding(scopeId)
     await saveScopeDirectory({ scopeId, directory: realRoot, optimizedAtMs })
     assertCurrent()
     const changing = binding.root !== realRoot
+    const rootChanged = Boolean(binding.root && changing)
     const restarting = changing ? scopedRestarts(binding) : []
     const stopped = changing ? disposeBinding(binding) : Promise.resolve()
     binding.root = realRoot
     binding.trusted = true
     if (changing) binding.lastReport = undefined
-    return { binding, restarting, stopped, revision: binding.revision }
+    return { binding, restarting, stopped, revision: binding.revision, rootChanged }
   })
+  if (rootChanged) notifyWorkspaceRootChanged(scopeId)
   await stopped
   if (scopes.get(scopeId) === binding && binding.revision === revision) {
     await batchStartServers(scopeId, binding, win, restarting)
@@ -1362,6 +1402,7 @@ export function registerWorkspaceIpc(owner: () => BrowserWindow | null) {
             binding.lastReport = undefined
             return { restarting, stopped, revision: binding.revision }
           })
+          notifyWorkspaceRootChanged(scopeId)
           await stopped
           if (scopes.get(scopeId) === binding && binding.revision === revision) {
             await batchStartServers(scopeId, binding, win, restarting)

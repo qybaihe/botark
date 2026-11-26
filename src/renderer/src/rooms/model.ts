@@ -234,9 +234,19 @@ export function roomRecipient(room: CollabRoom, externalAudience?: string): stri
   return [room.title, room.members.map((m) => m.name).join(', '), externalAudience].filter(Boolean).join(' · ')
 }
 
+/**
+ * Members whose platform refuses to run behind another application's tool
+ * protocol. Hark's policy rejects a multi-agent room frame outright, so it
+ * gets a plain assistant frame and accesses local workspaces via the hardened
+ * workspace portal instead of `[TOOL]` instructions.
+ */
+export function refusesRoomFrame(platform: PlatformId): boolean {
+  return platform === 'hark'
+}
+
 export function turnPrompt(room: CollabRoom, member: RoomMember, trigger?: RoomMessage): string {
   const isCoordinator = member.botId === room.coordinatorId
-  const plainAssistant = member.platform === 'hark' && !isCoordinator
+  const plainAssistant = refusesRoomFrame(member.platform) && !isCoordinator
   const formatPost = (message: RoomMessage) => {
     const text = plainAssistant && (message.authorBotId || message.final) && isFinal(message.text)
       ? stripFinalPrefix(message.text) : message.text
