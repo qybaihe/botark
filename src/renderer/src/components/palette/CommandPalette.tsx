@@ -9,17 +9,20 @@ import { getBridge } from '@/lib/bridge'
 import { cn } from '@/lib/cn'
 import { useOverlayLock } from '@/lib/overlay'
 import { botMatches } from '@/lib/selectors'
+import { buildSearchSnippet, searchRoomMessages } from '@/lib/conversationSearch'
+import { focusRoomMessage } from '@/rooms/roomFocus'
 import { shortcutLabel } from '@/lib/shortcuts'
 import { RoomAvatarCluster } from '@/rooms/RoomAvatarCluster'
 import { NEW_ROOM_ID } from '@/rooms/roomExport'
 import { useRooms } from '@/rooms/roomStore'
+import { usePromptStore } from '@/store/promptStore'
 import { useBotStore } from '@/store/botStore'
 import { plural, useT } from '@/lib/i18n'
 
 interface Row {
   key: string
   title: string
-  subtitle?: string
+  subtitle?: ReactNode
   lead: ReactNode
   hint?: string
   badges?: ReactNode
@@ -28,12 +31,10 @@ interface Row {
 
 const MAX_MESSAGE_HITS = 20
 
-function snippet(text: string, query: string): string {
-  const flat = text.replace(/\s+/g, ' ').trim()
-  const at = flat.toLowerCase().indexOf(query)
-  if (at < 0) return flat.slice(0, 80)
-  const from = Math.max(0, at - 24)
-  return (from > 0 ? '…' : '') + flat.slice(from, at + query.length + 60)
+function highlight(text: string, query: string) {
+  const at = text.toLowerCase().indexOf(query)
+  if (!query || at < 0) return text
+  return <>{text.slice(0, at)}<mark className="rounded-sm bg-accent-50 font-medium text-accent-600">{text.slice(at, at + query.length)}</mark>{text.slice(at + query.length)}</>
 }
 
 function CommandIcon({ children }: { children: ReactNode }) {
@@ -163,7 +164,7 @@ function PaletteBody({ onClose }: { onClose: () => void }) {
           hits.push({
             key: `msg:${bot.id}:${message.id}`,
             title: bot.name,
-            subtitle: snippet(message.text, wanted),
+            subtitle: highlight(buildSearchSnippet(message.text, wanted), wanted),
             lead: <BotAvatar emoji={bot.emoji} seed={bot.id} avatar={bot.avatar} platformId={bot.platformId} size="xs" />,
             run: () => {
               selectBot(bot.id)
@@ -177,9 +178,29 @@ function PaletteBody({ onClose }: { onClose: () => void }) {
         if (hits.length === MAX_MESSAGE_HITS) break
       }
       if (hits.length) out.push([t('Messages'), hits])
+
+      const roomHits = searchRoomMessages(rooms, wanted, MAX_MESSAGE_HITS).map(({ room, message, sender, snippet }) => ({
+        key: `room-msg:${room.id}:${message.id}`,
+        title: room.title,
+        subtitle: <>{highlight(sender, wanted)} · {highlight(snippet, wanted)}</>,
+        lead: <RoomAvatarCluster members={room.members.slice(0, 2)} size="xs" />,
+        run: () => {
+          selectBot(room.id)
+          const { webSessionOpen, closeWebSession } = useBotStore.getState()
+          if (webSessionOpen) closeWebSession()
+          focusRoomMessage(room.id, message.id)
+        }
+      }))
+      if (roomHits.length) out.push([t('Room messages'), roomHits])
     }
 
     const commands: Row[] = [
+      {
+        key: 'cmd:prompts',
+        title: t('Prompt library'),
+        lead: <CommandIcon><Sparkles /></CommandIcon>,
+        run: () => usePromptStore.getState().setLibraryOpen(true)
+      },
       {
         key: 'cmd:new',
         title: t('New bot'),

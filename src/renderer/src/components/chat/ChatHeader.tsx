@@ -4,6 +4,7 @@ import { memo, useEffect, useState } from 'react'
 import { PaneHeader } from '@/components/layout/PaneHeader'
 import { getPlatformInspector } from '@/components/info/platformInspector'
 import { ArkComposeNewSvg, ArkDrawerToggleSvg, ArkExportDocSvg } from '@/components/ui/ArkGlyphs'
+import { TranscriptSearchButton } from './TranscriptSearchBar'
 import { triggerShareConversation } from './ShareConversationDialog'
 import { BotAvatar } from '@/components/ui/Avatar'
 import { IconButton } from '@/components/ui/IconButton'
@@ -56,7 +57,7 @@ function useEnsureGrokAgentBound(bot: Bot): void {
   }, [bot.id, bot.platformId, bot.selectedAgentId, account?.id, account?.status, setSelectedAgent])
 }
 
-export const ChatHeader = memo(function ChatHeader({ bot }: { bot: Bot }) {
+export const ChatHeader = memo(function ChatHeader({ bot, showTranscriptSearch }: { bot: Bot; showTranscriptSearch: boolean }) {
   const hasMessages = useBotStore((s) => (s.messages[bot.id]?.length ?? 0) > 0)
   const infoOpen = useBotStore((s) => s.infoPanelOpen)
   const toggleInfoPanel = useBotStore((s) => s.toggleInfoPanel)
@@ -195,6 +196,7 @@ export const ChatHeader = memo(function ChatHeader({ bot }: { bot: Bot }) {
             <RefreshCw className={cn(activeAccount?.pending && 'animate-spin')} />
           </IconButton>
         )}
+        {showTranscriptSearch && <TranscriptSearchButton />}
         {hasMessages && (
           <IconButton
             label="共享对话页面"

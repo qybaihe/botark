@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/Button'
 import { Dialog } from '@/components/ui/Dialog'
 import { MarkdownText } from '@/components/chat/MarkdownText'
 import { SegmentedControl } from '@/components/ui/SegmentedControl'
+import { buildConversationMarkdown, buildConversationJson, sanitizeExportFilename, downloadTextFile } from '@/lib/conversationExport'
 import { translate, useT } from '@/lib/i18n'
 import { useBotStore } from '@/store/botStore'
 import { usePrefsStore, type Locale } from '@/store/prefsStore'
@@ -65,7 +66,7 @@ export function buildStandaloneShareHtml(
       return `<article class="turn ${isUser ? 'turn-user' : 'turn-bot'}">
   <div class="meta">${escapeHtml(isUser ? translate(locale, 'You') : bot.name)} · ${time}</div>
   ${quote}
-  <div class="bubble">${formatMessageHtml(m.text || '')}</div>
+  <div class="bubble">${formatMessageHtml(messageSummary(m))}</div>
 </article>`
     })
     .join('\n')
@@ -215,25 +216,27 @@ ${turnsHtml}
 </html>`
 }
 
-export function buildShareMarkdown(
-  bot: Bot,
-  platformName: string,
-  items: ChatMessage[],
-  locale: Locale = 'zh'
-): string {
-  const header = `# ${translate(locale, '{name} ({platform})', { name: bot.name, platform: platformName })}\n\n`
-  const body = items
-    .map((m) => {
-      const speaker = m.role === 'user' ? translate(locale, 'Me') : bot.name
-      const quote = m.replyQuote ? `> ${translate(locale, 'Quote: {text}', { text: m.replyQuote })}\n\n` : ''
-      return `### **${speaker}**\n\n${quote}${m.text || ''}`
-    })
-    .join('\n\n---\n\n')
-  return header + body + '\n'
+export { buildConversationMarkdown as buildShareMarkdown } from '@/lib/conversationExport'
+
+type ShareScope = 'all' | 'focus' | 'single' | 'range'
+type ShareSelection = {
+  conversationKey: string
+  messageId?: string
+  firstId?: string
+  lastId?: string
+  scope: ShareScope
+  id: symbol
 }
 
-type ShareScope = 'all' | 'focus'
-type ShareSelection = { conversationKey: string; messageId?: string; scope: ShareScope; id: symbol }
+function messageSummary(message: ChatMessage): string {
+  return message.text || [
+    ...(message.attachments ?? []).map((file) => file.name),
+    ...(message.media ?? []).map((file) => file.name || file.kind),
+    ...(message.tools ?? []).map((tool) => tool.name),
+    ...(message.widgets ?? []).map((widget) => widget.kind),
+    ...(message.richWidgets ?? []).map((widget) => widget.kind)
+  ].join(' · ')
+}
 
 function shareConversationKey(bot: Bot): string {
   return JSON.stringify([bot.id, bot.activeSessionId ?? bot.hermesSessionKey, bot.activeAccountId, bot.selectedAgentId])
@@ -296,40 +299,48 @@ export function ShareConversationDialog({
     return currentBot !== undefined && shareConversationKey(currentBot) === conversationKey
   }
 
+  const available = useMemo(() => open ? messages.filter((m) =>
+    m.text.trim() || m.replyQuote || m.tools?.length || m.attachments?.length || m.media?.length || m.widgets?.length || m.richWidgets?.length
+  ) : [], [open, messages])
+  const firstId = activeSelection?.firstId ?? focusMessageId ?? available[0]?.id
+  const lastId = activeSelection?.lastId ?? available.at(-1)?.id
+  const firstIndex = available.findIndex((message) => message.id === firstId)
   const selectedMessages = useMemo(() => {
-    if (!open) return []
-    const nonEmpty = messages.filter((m) => Boolean(m.text?.trim()))
-    if (scope === 'focus') {
-      const idx = nonEmpty.findIndex((m) => m.id === focusMessageId)
-      if (idx >= 0) {
-        const target = nonEmpty[idx]!
-        // Include preceding user prompt when sharing an assistant reply so context stays complete.
-        const prev = idx > 0 && target.role === 'bot' && nonEmpty[idx - 1]?.role === 'user' ? [nonEmpty[idx - 1]!] : []
-        return [...prev, target]
-      }
-      return []
+    if (scope === 'all') return available
+    const index = available.findIndex((m) => m.id === (scope === 'focus' ? focusMessageId : firstId))
+    if (index < 0) return []
+    if (scope === 'range') {
+      const end = available.findIndex((m) => m.id === lastId)
+      return end < index ? [] : available.slice(index, end + 1)
     }
-    return nonEmpty
-  }, [open, focusMessageId, messages, scope])
+    const includePrompt = scope === 'focus' && available[index]?.role === 'bot' && available[index - 1]?.role === 'user'
+    return available.slice(includePrompt ? index - 1 : index, index + 1)
+  }, [available, firstId, lastId, focusMessageId, scope])
   const canExport = open && selectedMessages.length > 0
 
-  const handleDownloadHtml = () => {
+  const handleDownload = (format: 'html' | 'md' | 'json') => {
     if (!canExport || !isCurrentShare()) return
-    const html = buildStandaloneShareHtml(bot, platform.name, selectedMessages, locale)
-    const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    const slug = bot.name.replace(/[^\p{L}\p{N}_-]+/gu, '-').replace(/^-|-$/g, '') || 'conversation'
-    a.href = url
-    a.download = `${slug}-share.html`
-    a.click()
-    setTimeout(() => URL.revokeObjectURL(url), 1500)
+    if (format === 'html') {
+      downloadTextFile(sanitizeExportFilename(bot.name + '-share', format),
+        buildStandaloneShareHtml(bot, platform.name, selectedMessages, locale), 'text/html;charset=utf-8')
+    } else if (format === 'md') {
+      downloadTextFile(sanitizeExportFilename(bot.name, format),
+        buildConversationMarkdown(bot, platform.name, selectedMessages, locale), 'text/markdown;charset=utf-8')
+    } else {
+      downloadTextFile(sanitizeExportFilename(bot.name, format),
+        buildConversationJson(bot, platform.name, selectedMessages), 'application/json')
+    }
+  }
+
+  const updateSelection = (patch: Partial<Pick<ShareSelection, 'firstId' | 'lastId' | 'scope'>>) => {
+    setCopiedId(undefined)
+    setSelection((previous) => previous && previous.id === activeSelection?.id ? { ...previous, ...patch } : previous)
   }
 
   const handleCopyMarkdown = () => {
     if (!canExport || !isCurrentShare()) return
     const { id } = activeSelection
-    const md = buildShareMarkdown(bot, platform.name, selectedMessages, locale)
+    const md = buildConversationMarkdown(bot, platform.name, selectedMessages, locale)
     void navigator.clipboard.writeText(md).then(() => {
       if (currentShare.current !== id) return
       setCopiedId(id)
@@ -365,20 +376,47 @@ export function ShareConversationDialog({
             </div>
           </div>
 
-          {focusMessageId && (
+          {available.length > 0 && (
             <SegmentedControl<ShareScope>
               size="xs"
               value={scope}
-              onValueChange={(scope) => {
-                setSelection((previous) => previous?.id === activeSelection.id ? { ...previous, scope } : previous)
-              }}
+              aria-label={t('Export scope')}
+              onValueChange={(scope) => updateSelection({ scope })}
               options={[
-                { value: 'focus', label: t('Current exchange') },
-                { value: 'all', label: t('Entire conversation ({count})', { count: messages.length }) }
+                ...(focusMessageId ? [{ value: 'focus' as const, label: t('Current exchange') }] : []),
+                { value: 'all', label: t('Entire conversation ({count})', { count: available.length }) },
+                { value: 'range', label: t('Message range') },
+                { value: 'single', label: t('Single message') }
               ]}
             />
           )}
         </div>
+
+        {(scope === 'range' || scope === 'single') && (
+          <div className="flex gap-2">
+            {(scope === 'range' ? ['first', 'last'] as const : ['first'] as const).map((bound) => (
+              <label key={bound} className="flex min-w-0 flex-1 flex-col gap-1 text-xs text-ink-secondary">
+                {t(scope === 'single' ? 'Message' : bound === 'first' ? 'From message' : 'Through message')}
+                <select className="min-w-0 rounded-md border border-line bg-main px-2 py-1.5 text-ink"
+                  value={(bound === 'first' ? firstId : lastId) ?? ''}
+                  onChange={(event) => {
+                    const id = event.target.value
+                    if (bound === 'last') updateSelection({ lastId: id })
+                    else {
+                      const pastEnd = available.findIndex((m) => m.id === id) > available.findIndex((m) => m.id === lastId)
+                      updateSelection(pastEnd ? { firstId: id, lastId: id } : { firstId: id })
+                    }
+                  }}>
+                  {available.map((m, index) => (
+                    <option key={m.id} value={m.id} disabled={bound === 'last' && index < firstIndex}>
+                      {index + 1}. {m.role === 'user' ? t('Me') : bot.name} · {messageSummary(m).slice(0, 55)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ))}
+          </div>
+        )}
 
         {/* Live Share Page Preview */}
         <div className="max-h-[340px] overflow-y-auto rounded-2xl border border-line/80 bg-sunken/35 p-4">
@@ -404,7 +442,7 @@ export function ShareConversationDialog({
                           : 'max-w-[86%] rounded-2xl bg-surface px-3.5 py-2.5 text-[13px] leading-5 text-ink ring-1 ring-line/60'
                       }
                     >
-                      {mine ? m.text : <MarkdownText text={m.text} />}
+                      {mine ? messageSummary(m) : <MarkdownText text={messageSummary(m)} />}
                     </div>
                   </div>
                 )
@@ -437,7 +475,7 @@ export function ShareConversationDialog({
             <span />
           )}
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               size="sm"
               variant="secondary"
@@ -447,11 +485,17 @@ export function ShareConversationDialog({
               {copiedMd ? <Check className="size-3.5 text-status-online" /> : <Copy className="size-3.5" />}
               {t(copiedMd ? 'Copied Markdown' : 'Copy Markdown')}
             </Button>
+            <Button size="sm" variant="secondary" disabled={!canExport} onClick={() => handleDownload('md')}>
+              {t('Download Markdown (.md)')}
+            </Button>
+            <Button size="sm" variant="secondary" disabled={!canExport} onClick={() => handleDownload('json')}>
+              {t('Download JSON (.json)')}
+            </Button>
             <Button
               size="sm"
               variant="primary"
               disabled={!canExport}
-              onClick={handleDownloadHtml}
+              onClick={() => handleDownload('html')}
             >
               <ArkExportDocSvg className="size-3.5" />
               {t('Download share page (.html)')}

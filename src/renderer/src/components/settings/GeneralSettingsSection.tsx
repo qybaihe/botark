@@ -1,3 +1,4 @@
+import { usePromptStore } from '@/store/promptStore'
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react'
 import { Download, FolderPlus, RefreshCw, ShieldAlert, Sparkles, Trash2 } from 'lucide-react'
 import { listGrokAuthAccountIds } from '@adapters/grokbot/tokenStore'
@@ -374,6 +375,13 @@ export function GeneralSettingsSection({
           >
             <RefreshCw className={cn('size-3.5', checkingUpdate && 'animate-spin')} />
             {tr('Check for updates')}
+          </Button>
+        </div>
+
+        <div className="flex items-center justify-between px-4 py-3.5">
+          <p className="text-[14px] font-medium text-ink">{tr('Prompt library')}</p>
+          <Button size="sm" variant="secondary" onClick={() => usePromptStore.getState().setLibraryOpen(true)}>
+            {tr('Manage prompt templates…')}
           </Button>
         </div>
 
