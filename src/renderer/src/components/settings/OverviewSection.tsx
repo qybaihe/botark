@@ -29,6 +29,7 @@ const PLATFORMS = [
   { id: 'dot', tab: 'dot-accounts', desc: 'Calpico Room' },
   { id: 'grok', tab: 'grok-accounts', desc: 'Sand PKCE' },
   { id: 'hark', tab: 'hark-accounts', desc: '项目空间' },
+  { id: 'gemini', tab: 'gemini-accounts', desc: 'Gemini API' },
   { id: 'hermes', tab: 'hermes-accounts', desc: '本地网关' },
   { id: 'antigravity', tab: 'antigravity-accounts', desc: 'Google Cloud' },
   { id: 'cue', tab: 'cue-accounts', desc: 'Cue 原生 / API' },
@@ -55,7 +56,7 @@ export function OverviewSection({
 
   const [searchQuery, setSearchQuery] = useState('')
   const [platformFilter, setPlatformFilter] = useState<
-    'all' | 'meta-muse' | 'dot' | 'grok' | 'hark' | 'hermes' | 'antigravity' | 'cue' | 'ds-bot'
+    'all' | PlatformId
   >('all')
   const [statusFilter, setStatusFilter] = useState<'all' | 'online' | 'offline'>('all')
   const [editingBotId, setEditingBotId] = useState<string | null>(null)
@@ -209,6 +210,7 @@ export function OverviewSection({
                 { value: 'hermes', label: `Hermes (${botCounts.get('hermes') ?? 0})` },
                 { value: 'antigravity', label: `Antigravity (${botCounts.get('antigravity') ?? 0})` },
                 { value: 'cue', label: `Cue (${botCounts.get('cue') ?? 0})` },
+                { value: 'gemini', label: `Gemini (${botCounts.get('gemini') ?? 0})` },
                 { value: 'ds-bot', label: `DS Bot (${botCounts.get('ds-bot') ?? 0})` }
               ]}
             />

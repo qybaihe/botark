@@ -1,3 +1,4 @@
+import { GeminiInfoSections } from '@/components/gemini/GeminiInfoSections'
 import { setRoomAdministrator, useRooms } from '@/rooms/roomStore'
 import { useState } from 'react'
 import { Pencil, X } from 'lucide-react'
@@ -392,6 +393,7 @@ function OpenInfoPanel({
                   <DotOrbitProfilesSection accountId={bot.activeAccountId} botId={bot.id} />
                 </>
               )}
+              {bot.platformId === 'gemini' && <GeminiInfoSections key={bot.activeAccountId} bot={bot} />}
               {bot.platformId === 'hermes' && bot.activeAccountId && (
                 <>
                   <HermesServerSection accountId={bot.activeAccountId} />

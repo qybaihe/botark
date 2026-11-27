@@ -70,6 +70,7 @@ async function purgeCredentials() {
     grok: bridge?.grok,
     dot: bridge?.dot,
     hark: bridge?.hark,
+    gemini: bridge?.gemini,
     hermes: bridge?.hermes,
     antigravity: bridge?.antigravity,
     cue: bridge?.cue,
@@ -118,7 +119,7 @@ async function purgeCredentials() {
       await bridge.webViews.clearPartition(id)
     })))
     // Include retained pool assignments and platform records outside the current Bot list.
-    await Promise.all((['dot', 'grok', 'cue', 'hermes', 'ds-bot'] as const).map(async (platform) => {
+    await Promise.all((['dot', 'grok', 'cue', 'gemini', 'hermes', 'ds-bot'] as const).map(async (platform) => {
       const auth = authBridges[platform]
       if (!auth?.clearAuth) return
       await attempt(PLATFORM_LABELS[platform], async () => {

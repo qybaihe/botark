@@ -1396,7 +1396,7 @@ export interface SecurityStoreAudit {
 
 export interface SecurityAccountAudit {
   accountId: string
-  platformId?: 'meta-muse' | 'grok' | 'hark' | 'dot' | 'hermes' | 'antigravity' | 'cue' | 'ds-bot'
+  platformId?: 'meta-muse' | 'grok' | 'hark' | 'dot' | 'hermes' | 'antigravity' | 'cue' | 'ds-bot' | 'gemini'
   partition: string
   transportProtocol: string
   credentialIsolation: string
@@ -1423,7 +1423,7 @@ export interface SecurityVaultStatus {
 
 export interface VaultStatusRequest {
   accountId?: string
-  platformId?: 'meta-muse' | 'grok' | 'hark' | 'dot' | 'hermes' | 'antigravity' | 'cue' | 'ds-bot'
+  platformId?: 'meta-muse' | 'grok' | 'hark' | 'dot' | 'hermes' | 'antigravity' | 'cue' | 'ds-bot' | 'gemini'
 }
 
 export const CUE_CHANNELS = {
@@ -1984,3 +1984,20 @@ export type DsBotRpcResponse =
 
 
 
+
+export const GEMINI_CHANNELS = {
+  config: 'bothub:gemini:config',
+  configure: 'bothub:gemini:configure',
+  verifyAndListModels: 'bothub:gemini:verifyAndListModels',
+  listAccounts: 'bothub:gemini:listAccounts',
+  clearAuth: 'bothub:gemini:clearAuth',
+  createSession: 'bothub:gemini:createSession',
+  listSessions: 'bothub:gemini:listSessions',
+  clearHistory: 'bothub:gemini:clearHistory',
+  getHistory: 'bothub:gemini:getHistory',
+  renameSession: 'bothub:gemini:renameSession',
+  deleteSession: 'bothub:gemini:deleteSession',
+  streamChat: 'bothub:gemini:streamChat',
+  cancelChat: 'bothub:gemini:cancelChat',
+  event: 'bothub:gemini:event'
+} as const

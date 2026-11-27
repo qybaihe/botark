@@ -82,6 +82,7 @@ function ConnectionNotice({
                 ? '登录 Hark 后即可发消息'
                 : isDot
                   ? '登录 ChatGPT Dot 或在右侧导入 AT / RT 后即可发消息'
+                  : account.platformId === 'gemini' ? t('Connect a Gemini API key to send messages')
                   : isHermes
                     ? '连接 Hermes API Server（hermes gateway）后即可发消息'
                     : isAntigravity
@@ -92,7 +93,11 @@ function ConnectionNotice({
                           ? '连接 DS Bot（MCP Token / 加密配对链接 / DSH Web）后即可发消息'
                           : '账号未连接'}
       </span>
-      {isMuse && onMuseLogin && !isError ? (
+      {account.platformId === 'gemini' ? (
+        <Button size="sm" onClick={() => useBotStore.getState().setSettingsOpen(true, 'gemini-accounts')}>
+          {t('Configure Gemini connection')}
+        </Button>
+      ) : isMuse && onMuseLogin && !isError ? (
         <>
           <Button size="sm" variant="primary" onClick={onMuseLogin} disabled={account.pending}>
             {account.pending && <Loader2 className="animate-spin" aria-hidden />}

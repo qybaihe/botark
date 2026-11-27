@@ -669,6 +669,8 @@ async function memberReply(room: CollabRoom, member: RoomMember, trigger: RoomMe
   const hermesSessionKey = member.platform === 'hermes'
     ? member.hermesSessionKey || `${room.id}-${member.botId}` : undefined
   const cancel = () => {
+    // Gemini's adapter aborts this exact room request via the supplied signal.
+    if (member.platform === 'gemini') return
     void cancelPlatformTurn({
       ...bot,
       activeAccountId: member.accountId,

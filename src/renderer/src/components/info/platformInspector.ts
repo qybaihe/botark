@@ -73,6 +73,14 @@ export const PLATFORM_INSPECTORS: Record<PlatformId, PlatformInspectorSpec> = {
       { id: 'library', label: 'Pages' }
     ]
   },
+  gemini: {
+    platformId: 'gemini',
+    displayName: 'Google Gemini',
+    protocolLabel: 'Gemini API · REST + SSE',
+    supportsWebSession: true,
+    supportsQuickNewConversation: true,
+    tabs: [{ id: 'overview', label: 'Overview' }]
+  },
   hermes: {
     platformId: 'hermes',
     displayName: 'Hermes',

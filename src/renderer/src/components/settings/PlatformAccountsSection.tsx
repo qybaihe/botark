@@ -48,6 +48,7 @@ export const PLATFORM_LABELS: Record<PlatformId, string> = {
   dot: 'ChatGPT Dot',
   grok: 'Grok Bot',
   hark: 'Hark Pro',
+  gemini: 'Google Gemini',
   hermes: 'Hermes',
   antigravity: 'Antigravity',
   cue: 'Cue (Manus)',

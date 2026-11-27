@@ -39,6 +39,7 @@ const PLATFORM_LOGIN_LABELS: Record<PlatformId, string> = {
   grok: '使用 Grok Bot 登录',
   hark: '使用 Hark 登录',
   dot: '使用 ChatGPT Dot 登录',
+  gemini: '配置 Gemini 连接',
   hermes: '配置 Hermes 连接',
   antigravity: '使用 Antigravity 登录',
   cue: '使用 Cue 登录',
@@ -187,6 +188,9 @@ export function ChatArea() {
         return onHarkLogin(activeAccount.id)
       case 'dot':
         return onDotLogin(activeAccount.id)
+      case 'gemini':
+        useBotStore.getState().setSettingsOpen(true, 'gemini-accounts')
+        return
       case 'hermes':
         useBotStore.getState().setSettingsOpen(true, 'hermes-accounts')
         return

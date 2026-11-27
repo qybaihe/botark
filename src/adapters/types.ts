@@ -20,6 +20,7 @@ export type PlatformId =
   | 'antigravity'
   | 'cue'
   | 'ds-bot'
+  | 'gemini'
 
 /** Connection state of a single platform account. */
 export type ConnectionStatus = 'online' | 'busy' | 'attention' | 'offline' | 'error'
@@ -57,6 +58,8 @@ export interface AttachmentMeta {
 }
 
 export interface OutgoingMessage {
+  /** Locally assigned user message ID for adapters with local transcripts. */
+  userMessageId?: string
   agentId?: string
   /** BotHub conversation id (one conversation per bot). */
   conversationId: string
@@ -141,6 +144,7 @@ export interface MuseMediaPart {
 }
 
 export type MuseRichWidget =
+  | import('@shared/gemini').GeminiSearchWidget
   | {
       kind: 'shopping_results' | 'shopping_results_v2'
       widgetId: string

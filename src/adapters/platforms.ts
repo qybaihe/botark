@@ -51,6 +51,15 @@ export const PLATFORMS: readonly PlatformDescriptor[] = [
     loginUrl: 'https://app.hark.com/login'
   },
   {
+    id: 'gemini',
+    name: 'Google Gemini',
+    description: 'Google 多模态助手 · 流式对话、搜索引用与本地会话历史',
+    availability: 'available',
+    monogram: 'Ge',
+    homeUrl: 'https://gemini.google.com/app',
+    loginUrl: 'https://aistudio.google.com/apikey'
+  },
+  {
     id: 'hermes',
     name: 'Hermes',
     description: 'Nous 开源智能体 · 直连本机或远程网关，支持流式与审批',

@@ -97,7 +97,7 @@ describe('bot naming', () => {
 
   it('preserves existing proxy slots during targeted assignment', () => {
     const accounts = { dot: connected('dot', 'dot'), muse: connected('meta-muse', 'muse'), hermes: connected('hermes', 'hermes') }
-    expect([...PROXY_POOL_PLATFORMS]).toEqual(['meta-muse', 'grok', 'dot', 'hark', 'antigravity', 'cue'])
+    expect([...PROXY_POOL_PLATFORMS]).toEqual(['meta-muse', 'grok', 'dot', 'hark', 'gemini', 'antigravity', 'cue'])
     expect(poolAccountIds(accounts)).toMatchObject({ assignableIds: ['muse', 'dot'], keepIds: ['dot', 'hermes'] })
     expect(proxyPoolArgsForAccounts(accounts, ['dot', 'new', 'dot', 'hermes'])).toEqual({
       accountIds: ['dot', 'new'], keepIds: ['muse', 'hermes']
@@ -269,6 +269,23 @@ describe('session navigation', () => {
     vi.useRealTimers()
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
+  })
+
+  it('keeps the selected Gemini transcript when an older history load completes late', async () => {
+    useBotStore.setState({ bots: [{ ...bot, platformId: 'gemini' }], messages: { [bot.id]: [chatMessage('previous')] } })
+    const slow = deferred<ReturnType<typeof row>[]>()
+    const getHistory = vi.fn().mockReturnValueOnce(slow.promise).mockResolvedValueOnce([row('latest')])
+    const deleteSession = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('window', { electron: { gemini: { getHistory, deleteSession } } })
+    const first = store().switchGeminiSession(bot.id, 'old')
+    await store().switchGeminiSession(bot.id, 'new')
+    slow.resolve([row('stale')])
+    await first
+    expect(store().bots[0]?.activeSessionId).toBe('new')
+    expect(store().messages[bot.id]?.map((m) => m.id)).toEqual(['latest'])
+    await store().deleteGeminiSession(bot.id, 'new')
+    expect(store().bots[0]?.activeSessionId).toBeUndefined()
+    expect(store().messages[bot.id]).toEqual([])
   })
 
   it('drops observer snapshots from the previous Hark session or account', () => {

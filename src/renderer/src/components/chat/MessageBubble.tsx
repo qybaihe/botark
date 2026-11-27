@@ -267,6 +267,12 @@ function RichWidgets({
             </li>
           )
         }
+        if (w.kind === 'google_search') {
+          return <li key={w.widgetId}>
+            <iframe title="Google Search" sandbox="allow-popups" srcDoc={w.html}
+              referrerPolicy="no-referrer" className="h-24 w-full rounded-lg border border-line" />
+          </li>
+        }
         if (w.kind === 'html') {
           return (
             <li key={w.widgetId} className="overflow-hidden rounded-xl border border-line bg-surface shadow-soft">

@@ -1,3 +1,4 @@
+import { thoughtTools } from '@adapters/gemini/adapter'
 import { create } from 'zustand'
 import { persist, type PersistStorage } from 'zustand/middleware'
 import { shallow } from 'zustand/shallow'
@@ -150,6 +151,7 @@ export interface BotHubState {
     | 'dot-accounts'
     | 'grok-accounts'
     | 'hark-accounts'
+    | 'gemini-accounts'
     | 'hermes-accounts'
     | 'antigravity-accounts'
     | 'cue-accounts'
@@ -200,6 +202,7 @@ export interface BotHubState {
       | 'dot-accounts'
       | 'grok-accounts'
       | 'hark-accounts'
+      | 'gemini-accounts'
       | 'hermes-accounts'
       | 'antigravity-accounts'
       | 'cue-accounts'
@@ -243,6 +246,9 @@ export interface BotHubState {
   switchHarkSession: (botId: string, sessionId: string) => Promise<void>
   /** Resolves to the new Hark conversation id (undefined if the bot is gone). */
   startNewHarkSession: (botId: string, title: string) => Promise<string | undefined>
+  switchGeminiSession: (botId: string, sessionId: string) => Promise<void>
+  startNewGeminiSession: (botId: string) => Promise<void>
+  deleteGeminiSession: (botId: string, sessionId: string) => Promise<void>
   switchHermesSession: (botId: string, sessionId: string) => Promise<void>
   startNewHermesSession: (botId: string) => Promise<boolean>
   switchAntigravitySession: (botId: string, sessionId: string) => Promise<void>
@@ -592,6 +598,7 @@ export const useBotStore = create<BotHubState>()(
             const platformBridge = platformId === 'grok' ? bridge?.grok
               : platformId === 'dot' ? bridge?.dot
               : platformId === 'hark' ? bridge?.hark
+              : platformId === 'gemini' ? bridge?.gemini
               : platformId === 'hermes' ? bridge?.hermes
               : platformId === 'antigravity' ? bridge?.antigravity
               : platformId === 'cue' ? bridge?.cue
@@ -735,6 +742,7 @@ export const useBotStore = create<BotHubState>()(
           : message.text
       const receipt = await withTimeout(
         adapter.sendMessage({
+          userMessageId: messageId,
           conversationId: botId,
           accountId: message.accountId,
           agentId: bot.selectedAgentId,
@@ -1221,6 +1229,9 @@ export const useBotStore = create<BotHubState>()(
       })
       flushWorkspacePersistence()
       await Promise.all(cleanup)
+      if (bot.platformId === 'gemini') {
+        await Promise.all(orphaned.map((id) => electronBridge()?.gemini?.clearHistory(id)))
+      }
     },
 
     sendMessage: async (botId, text, attachments) => {
@@ -1628,6 +1639,49 @@ export const useBotStore = create<BotHubState>()(
       }
     },
 
+    switchGeminiSession: async (botId, sessionId) => {
+      const bot = get().bots.find((b) => b.id === botId)
+      const api = electronBridge()?.gemini
+      if (!bot || bot.platformId !== 'gemini' || !api) return
+      const selection = markSessionSelection(botId)
+      const history = await api.getHistory(bot.activeAccountId, sessionId)
+      if (!isCurrentSession(bot, selection)) return
+      const transition = beginHistorySelection(bot, sessionId)
+      const messages = history.map(({ thought, ...message }) => ({
+        ...message, botId, accountId: bot.activeAccountId,
+        delivery: message.role === 'user' ? 'sent' as const : undefined, tools: thoughtTools(message.id, thought)
+      }))
+      if (bot.activeSessionId === sessionId) {
+        commitHistory(transition.target, transition.selection, transition.before, messages)
+      } else {
+        // Selection is atomic with hydration. No pending or failed rows from the old session carry over.
+        transcriptTransitions.delete(botId)
+        set((state) => ({ messages: { ...state.messages, [botId]: messages } }))
+      }
+    },
+
+    startNewGeminiSession: async (botId) => {
+      const bot = get().bots.find((b) => b.id === botId)
+      const api = electronBridge()?.gemini
+      if (!bot || bot.platformId !== 'gemini' || !api) return
+      const selection = markSessionSelection(botId)
+      const session = await api.createSession(bot.activeAccountId)
+      if (isCurrentSession(bot, selection)) setFreshSession(bot, session.id)
+      else await api.deleteSession(bot.activeAccountId, session.id)
+    },
+
+    deleteGeminiSession: async (botId, sessionId) => {
+      const bot = get().bots.find((b) => b.id === botId)
+      const api = electronBridge()?.gemini
+      if (!bot || bot.platformId !== 'gemini' || !api) return
+      await api.deleteSession(bot.activeAccountId, sessionId)
+      const current = get().bots.find((b) => b.id === botId)
+      if (current?.activeAccountId === bot.activeAccountId && current.activeSessionId === sessionId) {
+        markSessionSelection(botId)
+        setFreshSession(current, undefined)
+      }
+    },
+
     switchHermesSession: async (botId, sessionId) => {
       const bot = get().bots.find((b) => b.id === botId)
       if (!bot || bot.platformId !== 'hermes') return
@@ -1738,7 +1792,7 @@ export const useBotStore = create<BotHubState>()(
         const turn = changed ? clearedSession(state, bot) : undefined
         const accounts = turn?.accounts ?? state.accounts
         const account = accounts[accountId]
-        const resetSession = changed && (bot.platformId === 'hark' || bot.platformId === 'cue')
+        const resetSession = changed && (bot.platformId === 'gemini' || bot.platformId === 'hark' || bot.platformId === 'cue')
         return {
           ...turn,
           ...(resetSession ? { messages: { ...state.messages, [botId]: [] } } : {}),
@@ -1887,6 +1941,7 @@ export const useBotStore = create<BotHubState>()(
       set((state) => ({ accounts: omitKey(state.accounts, accountId), activity: omitKey(state.activity, accountId) }))
       flushWorkspacePersistence()
       await cleanup
+      if (account.platformId === 'gemini') await electronBridge()?.gemini?.clearHistory(accountId)
     },
 
     setAccountStatus: (accountId, status, detail) => patchAccount(accountId, { status, statusDetail: detail }),
@@ -1930,6 +1985,10 @@ export const useBotStore = create<BotHubState>()(
               if (isCurrent()) patchAccount(accountId, { statusDetail: errorMessage(error) })
             })
           }
+        } else if (account.platformId === 'gemini' && isLive) {
+          const owners = get().bots.filter((bot) => bot.activeAccountId === accountId && bot.activeSessionId)
+          await Promise.all(owners.map((bot) => get().switchGeminiSession(bot.id, bot.activeSessionId!)
+            .catch((error) => { if (isCurrent()) setChatActionError(bot.id, errorMessage(error)) })))
         } else if (account.platformId === 'antigravity' && isLive) {
           const bridge = electronBridge()
           void bridge?.antigravity
@@ -3056,6 +3115,7 @@ export const useBotStore = create<BotHubState>()(
         await bridge?.dot?.clearAuth?.('*').catch(() => undefined)
         await bridge?.grok?.clearAuth?.('*').catch(() => undefined)
         await bridge?.cue?.clearAuth?.('*').catch(() => undefined)
+        await bridge?.gemini?.clearAuth?.('*').catch(() => undefined)
         await bridge?.hermes?.clearAuth?.('*').catch(() => undefined)
         await bridge?.dsBot?.clearAuth?.('*').catch(() => undefined)
         await bridge?.muse?.clearProxyPool?.().catch(() => undefined)
@@ -3074,6 +3134,7 @@ export const useBotStore = create<BotHubState>()(
 
     resetWorkspace: async () => {
       await get().clearAllCredentials()
+      await electronBridge()?.gemini?.clearHistory('*')
       const fresh = createSeed()
       sessionSelections.clear()
       pendingHarkSelections.clear()

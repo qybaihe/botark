@@ -3,6 +3,7 @@ import { createMuseAdapter } from "./meta-muse/adapter"
 import { createGrokBotAdapter } from "./grokbot/GrokBotAdapter"
 import { createHarkAdapter } from "./hark/HarkAdapter"
 import { createDotAdapter } from "./dot/DotAdapter"
+import { GeminiAdapter } from "./gemini/adapter"
 import { createHermesAdapter } from "./hermes/HermesAdapter"
 import { createAntigravityAdapter } from "./antigravity/AntigravityAdapter"
 import { createCueAdapter } from "./cue/CueAdapter"
@@ -38,6 +39,7 @@ export function registerBuiltInAdapters(registry: AdapterRegistry = adapterRegis
   if (!registry.has("grok")) registry.register(createGrokBotAdapter())
   if (!registry.has("hark")) registry.register(createHarkAdapter())
   if (!registry.has("dot")) registry.register(createDotAdapter())
+  if (!registry.has("gemini")) registry.register(new GeminiAdapter())
   if (!registry.has("hermes")) registry.register(createHermesAdapter())
   if (!registry.has("antigravity")) registry.register(createAntigravityAdapter())
   if (!registry.has("cue")) registry.register(createCueAdapter())

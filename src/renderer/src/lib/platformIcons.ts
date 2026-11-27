@@ -3,6 +3,7 @@ import grokIcon from "@/assets/platforms/grok.png"
 import museIcon from "@/assets/platforms/muse.svg"
 import harkIcon from "@/assets/platforms/hark.svg"
 import dotIcon from "@/assets/platforms/dot.svg"
+import geminiIcon from "@/assets/platforms/gemini.svg"
 import hermesIcon from "@/assets/platforms/hermes.png"
 import antigravityIcon from "@/assets/platforms/antigravity.png"
 import cueIcon from "@/assets/platforms/cue.svg"
@@ -20,6 +21,7 @@ const ICONS: Partial<Record<PlatformId, string>> = {
   grok: grokIcon,
   hark: harkIcon,
   dot: dotIcon,
+  gemini: geminiIcon,
   hermes: hermesIcon,
   antigravity: antigravityIcon,
   cue: cueIcon,

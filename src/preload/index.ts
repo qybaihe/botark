@@ -1,3 +1,4 @@
+import type { GeminiEvent } from '@shared/gemini'
 import { SLACK_CHANNEL, SLACK_INBOUND, type SlackInbound } from '@shared/slack'
 import { WORKSPACE_CHANNEL } from '@shared/workspace'
 import { WORKSPACE_PORTAL_CHANNEL } from '@shared/workspacePortal'
@@ -8,6 +9,7 @@ import {
   CUE_CHANNELS,
   DOT_CHANNELS,
   DS_BOT_CHANNELS,
+  GEMINI_CHANNELS,
   GROK_CHANNELS,
   HARK_CHANNELS,
   HERMES_CHANNELS,
@@ -198,6 +200,26 @@ const bridge: BotHubBridge = {
       const handler = (_event: unknown, payload: CueMainEvent) => listener(payload)
       ipcRenderer.on(CUE_CHANNELS.event, handler)
       return () => ipcRenderer.removeListener(CUE_CHANNELS.event, handler)
+    }
+  },
+  gemini: {
+    config: (...args) => ipcRenderer.invoke(GEMINI_CHANNELS.config, ...args),
+    configure: (...args) => ipcRenderer.invoke(GEMINI_CHANNELS.configure, ...args),
+    verifyAndListModels: (...args) => ipcRenderer.invoke(GEMINI_CHANNELS.verifyAndListModels, ...args),
+    listAccounts: (...args) => ipcRenderer.invoke(GEMINI_CHANNELS.listAccounts, ...args),
+    clearAuth: (...args) => ipcRenderer.invoke(GEMINI_CHANNELS.clearAuth, ...args),
+    createSession: (...args) => ipcRenderer.invoke(GEMINI_CHANNELS.createSession, ...args),
+    listSessions: (...args) => ipcRenderer.invoke(GEMINI_CHANNELS.listSessions, ...args),
+    clearHistory: (...args) => ipcRenderer.invoke(GEMINI_CHANNELS.clearHistory, ...args),
+    getHistory: (...args) => ipcRenderer.invoke(GEMINI_CHANNELS.getHistory, ...args),
+    renameSession: (...args) => ipcRenderer.invoke(GEMINI_CHANNELS.renameSession, ...args),
+    deleteSession: (...args) => ipcRenderer.invoke(GEMINI_CHANNELS.deleteSession, ...args),
+    streamChat: (...args) => ipcRenderer.invoke(GEMINI_CHANNELS.streamChat, ...args),
+    cancelChat: (...args) => ipcRenderer.invoke(GEMINI_CHANNELS.cancelChat, ...args),
+    onEvent: (listener) => {
+      const handler = (_event: unknown, payload: GeminiEvent) => listener(payload)
+      ipcRenderer.on(GEMINI_CHANNELS.event, handler)
+      return () => ipcRenderer.removeListener(GEMINI_CHANNELS.event, handler)
     }
   },
   dsBot: {

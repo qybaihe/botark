@@ -67,6 +67,7 @@ export default function App() {
         account.platformId === 'grok' ||
         account.platformId === 'hark' ||
         account.platformId === 'dot' ||
+        account.platformId === 'gemini' ||
         account.platformId === 'hermes' ||
         account.platformId === 'antigravity' ||
         account.platformId === 'cue' ||

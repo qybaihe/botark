@@ -84,6 +84,7 @@ export interface ChatMediaPart {
 }
 
 export type ChatRichWidget =
+  | import('@shared/gemini').GeminiSearchWidget
   | {
       kind: 'shopping_results' | 'shopping_results_v2'
       widgetId: string

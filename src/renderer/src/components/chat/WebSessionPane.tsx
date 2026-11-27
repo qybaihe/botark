@@ -40,7 +40,7 @@ export function WebSessionPane({ bot, account }: WebSessionPaneProps) {
   // While the user interacts or logs in inside WebSessionPane, periodically probe account status
   // when offline/error so the header capsule & sidebar status dot immediately update to online.
   useEffect(() => {
-    if (state.status !== 'ready') return
+    if (state.status !== 'ready' || bot.platformId === 'gemini') return
     if (account.status !== 'offline' && account.status !== 'error') return
     void connectAccount(account.id)
     const timer = setInterval(() => {
@@ -54,7 +54,7 @@ export function WebSessionPane({ bot, account }: WebSessionPaneProps) {
       }
     }, 3500)
     return () => clearInterval(timer)
-  }, [state.status, account.id, account.status, connectAccount])
+  }, [state.status, account.id, account.status, bot.platformId, connectAccount])
 
   const reloadView = () => {
     void getBridge()?.webViews?.navigate?.(viewId).then(() => connectAccount(account.id)).catch(() => undefined)

@@ -45,6 +45,7 @@ interface PlatformGuideItem {
     | 'muse-accounts'
     | 'hark-accounts'
     | 'dot-accounts'
+    | 'gemini-accounts'
     | 'hermes-accounts'
     | 'antigravity-accounts'
     | 'cue-accounts'
@@ -120,6 +121,20 @@ const PLATFORM_GUIDE_ITEMS: PlatformGuideItem[] = [
     shape: 'star',
     color: 'orange',
     grokState: 'streaming'
+  },
+  {
+    id: 'gemini',
+    title: 'Google Gemini',
+    settingsTab: 'gemini-accounts',
+    accountRule: '每个账号独立保存 API Key、模型设置和本地会话',
+    importMethods: '在 Google AI Studio 获取 API Key，测试连接后选择对话模型',
+    workbenchCards: [
+      { title: '多模态与搜索', summary: '发送图片、PDF、音频或文本附件，启用 Google 搜索查看引用来源' },
+      { title: '会话与用量', summary: '切换本地会话，查看最近一轮的输入、输出和思考 token 数' }
+    ],
+    shape: 'sparkle',
+    color: 'blue',
+    grokState: 'thinking'
   },
   {
     id: 'hermes',
@@ -242,6 +257,7 @@ function FullScreenGuideBody({
       | 'muse-accounts'
       | 'hark-accounts'
       | 'dot-accounts'
+      | 'gemini-accounts'
       | 'hermes-accounts'
       | 'antigravity-accounts'
       | 'cue-accounts'

@@ -53,7 +53,7 @@ const AUDITED_STORES: ReadonlyArray<{ id: string; label: string; fileName: strin
 ]
 
 const PLATFORM_SECURITY_SPECS: Record<
-  'meta-muse' | 'grok' | 'hark' | 'dot' | 'hermes' | 'antigravity' | 'cue' | 'ds-bot',
+  'meta-muse' | 'grok' | 'hark' | 'dot' | 'hermes' | 'antigravity' | 'cue' | 'ds-bot' | 'gemini',
   { transportProtocol: string; credentialIsolation: string }
 > = {
   'meta-muse': {
@@ -71,6 +71,10 @@ const PLATFORM_SECURITY_SPECS: Record<
   dot: {
     transportProtocol: 'Calpico REST + Celsius WSS（TLS 1.3）',
     credentialIsolation: '系统钥匙串 SafeStorage 令牌库 + 加密记忆迁移保险箱'
+  },
+  gemini: {
+    transportProtocol: 'Gemini REST + SSE · 主进程代理转发',
+    credentialIsolation: '系统钥匙串加密 API Key + 独立网页会话分区'
   },
   hermes: {
     transportProtocol: 'Hermes Gateway REST + Native Session SSE（主进程代理转发）',
@@ -170,6 +174,11 @@ async function decryptPayload(encBase64: string): Promise<string> {
     return out.result
   }
   return safeStorage.decryptString(buf)
+}
+
+/** Main-process namespace enumeration for private credential cleanup. */
+export function listVaultKeys(prefix: string): string[] {
+  return Object.keys(readVault()).filter((key) => key.startsWith(prefix))
 }
 
 export async function getVaultSecret(key: string): Promise<string | null> {

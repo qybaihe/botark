@@ -45,6 +45,8 @@ export async function cancelPlatformTurn(bot: Bot): Promise<void> {
         op: 'cancelTurn'
       })
       .catch(() => undefined)
+  } else if (bot.platformId === 'gemini') {
+    await bridge?.gemini?.cancelChat(bot.activeAccountId, { conversationId: bot.id, sessionId: bot.activeSessionId })
   } else if (bot.platformId === 'hermes' && bridge?.hermes?.rpc) {
     const res = await bridge.hermes.rpc({
       accountId: bot.activeAccountId,

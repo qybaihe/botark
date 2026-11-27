@@ -161,6 +161,8 @@ function buildWorkspaceSnapshot(onMediaResolved?: () => void): MobileWorkspaceSn
   const s = useBotStore.getState()
   const accounts: Record<string, MobileSyncedAccount> = {}
   for (const [id, acc] of Object.entries(s.accounts)) {
+    // Version 1 companion clients decode platform IDs as closed enums.
+    if (acc.platformId === 'gemini') continue
     accounts[id] = {
       id: acc.id,
       platformId: acc.platformId,
@@ -171,7 +173,9 @@ function buildWorkspaceSnapshot(onMediaResolved?: () => void): MobileWorkspaceSn
     }
   }
 
-  const bots: MobileSyncedBot[] = s.bots.map((b) => {
+  const desktopOnlyBots = new Set<string>()
+  const bots: MobileSyncedBot[] = s.bots.flatMap((b) => {
+    if (b.platformId === 'gemini') { desktopOnlyBots.add(b.id); return [] }
     const botMsgs = s.messages[b.id] ?? []
     const lastMsgAt = botMsgs.length ? botMsgs[botMsgs.length - 1]!.createdAt : b.createdAt
     return {
@@ -192,6 +196,7 @@ function buildWorkspaceSnapshot(onMediaResolved?: () => void): MobileWorkspaceSn
 
   const messages: Record<string, MobileSyncedMessage[]> = {}
   for (const [botId, list] of Object.entries(s.messages)) {
+    if (desktopOnlyBots.has(botId)) continue
     const tail = list.slice(-MAX_MESSAGES_PER_BOT)
     messages[botId] = tail.map((m) => ({
       id: m.id,
@@ -211,7 +216,7 @@ function buildWorkspaceSnapshot(onMediaResolved?: () => void): MobileWorkspaceSn
     version: 1,
     updatedAtMs: Date.now(),
     hostName: 'BotArk Desktop',
-    selectedBotId: s.selectedBotId,
+    selectedBotId: s.selectedBotId && desktopOnlyBots.has(s.selectedBotId) ? null : s.selectedBotId,
     groups: s.groups.map((g) => ({ id: g.id, name: g.name, collapsed: Boolean(s.collapsedGroups[g.id]) })),
     bots,
     accounts,
@@ -296,6 +301,7 @@ export function startMobileSyncBridge(): () => void {
 
   // Forward real-time streaming deltas, typing, status, and approvals immediately
   const handleAdapterEvent = (platformId: PlatformId, event: AdapterEvent) => {
+    if (platformId === 'gemini') return
     const store = useBotStore.getState()
     const accountId = event.type === 'message' ? event.message.accountId : event.accountId
     const account = store.accounts[accountId]

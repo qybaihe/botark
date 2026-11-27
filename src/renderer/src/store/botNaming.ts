@@ -8,6 +8,7 @@ export const PROXY_POOL_PLATFORMS: ReadonlySet<PlatformId> = new Set([
   'grok',
   'dot',
   'hark',
+  'gemini',
   'antigravity',
   'cue'
 ])

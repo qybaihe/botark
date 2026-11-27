@@ -48,6 +48,7 @@ export function Sidebar({ onAddBot }: SidebarProps) {
         ? 'grok-accounts'
         : selectedPlatformId === 'hark'
           ? 'hark-accounts'
+          : selectedPlatformId === 'gemini' ? 'gemini-accounts'
           : selectedPlatformId === 'hermes'
             ? 'hermes-accounts'
             : selectedPlatformId === 'antigravity'
