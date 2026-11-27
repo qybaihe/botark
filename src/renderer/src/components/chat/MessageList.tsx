@@ -1,6 +1,7 @@
 import { Fragment, memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { ArrowDown, ChevronUp } from 'lucide-react'
 import { BotAvatar } from '@/components/ui/Avatar'
+import { revealTranscriptRow } from '@/lib/transcriptFocus'
 import { cn } from '@/lib/cn'
 import { formatDayLabel, isSameDay } from '@/lib/format'
 import type { Bot, BotAccount, ChatMessage } from '@/types'
@@ -151,12 +152,10 @@ function Transcript({ bot, messages, accounts, typing, onRetry }: MessageListPro
     if (row && view) {
       stickToBottom.current = false
       setVisibleCount((count) => Math.max(count, focusCount))
-      row.scrollIntoView({ block: 'center', behavior: 'instant' })
-      row.focus({ preventScroll: true })
-      updateScrollState(view)
+      revealTranscriptRow(row)
     }
     setFocusMessageId(undefined)
-  }, [focusMessageId, focusCount, updateScrollState])
+  }, [focusMessageId, focusCount])
 
   const loadEarlier = () => {
     const view = scrollRef.current

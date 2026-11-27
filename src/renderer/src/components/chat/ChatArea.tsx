@@ -15,7 +15,8 @@ import { useBotStore } from '@/store/botStore'
 import type { Bot, BotAccount, ChatMessage } from '@/types'
 import { ChatHeader } from './ChatHeader'
 import { Composer } from './Composer'
-import { MessageList } from './MessageList'
+import { TranscriptSearchBar } from './TranscriptSearchBar'
+import { focusChatMessage, MessageList } from './MessageList'
 import { WebSessionPane } from './WebSessionPane'
 import { DocumentCanvasPane } from './NativeDocumentDialog'
 import { ShareConversationDialog } from './ShareConversationDialog'
@@ -219,7 +220,7 @@ export function ChatArea() {
   return (
     <div className="flex min-h-0 flex-1 overflow-hidden">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <ChatHeader key={JSON.stringify([bot.id, bot.activeAccountId])} bot={bot} />
+        <ChatHeader key={JSON.stringify([bot.id, bot.activeAccountId])} bot={bot} showTranscriptSearch={!showWebSession} />
         {sessionError && (
           <p role="alert" className="mx-6 my-2 text-[13px] text-status-error">
             {t('Could not start a new conversation. {reason}', { reason: sessionError })}
@@ -230,6 +231,8 @@ export function ChatArea() {
           <ChatWebSession key={`${bot.id}:${activeAccount.id}`} bot={bot} account={activeAccount} />
         ) : (
           <>
+            <TranscriptSearchBar key={JSON.stringify([bot.id, bot.activeAccountId, bot.activeSessionId, bot.hermesSessionKey, bot.selectedAgentId])}
+              conversationId={bot.id} messages={messages} focusMessage={focusChatMessage} />
             {bot.platformId === 'hark' && activeAccount && canSend && (
               <HarkBrowserCard key={JSON.stringify([activeAccount.id, bot.activeSessionId])}
                 accountId={activeAccount.id} sessionId={bot.activeSessionId} />

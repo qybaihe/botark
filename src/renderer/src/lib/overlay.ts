@@ -8,6 +8,10 @@ import { create } from 'zustand'
  */
 export const useOverlayStore = create<{ count: number }>()(() => ({ count: 0 }))
 
+export function hasOpenOverlay(): boolean {
+  return useOverlayStore.getState().count > 0 || Boolean(document.querySelector('[role="dialog"]:not([data-state="closed"]), [aria-modal="true"]:not([data-state="closed"])'))
+}
+
 export function useOverlayLock(active: boolean): void {
   useEffect(() => {
     if (!active) return

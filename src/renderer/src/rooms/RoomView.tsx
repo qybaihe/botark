@@ -12,6 +12,9 @@ import {
   Square,
   X
 } from 'lucide-react'
+import { TranscriptSearchBar, TranscriptSearchButton } from '@/components/chat/TranscriptSearchBar'
+import { revealTranscriptRow } from '@/lib/transcriptFocus'
+import { focusRoomMessage, ROOM_FOCUS_EVENT, takeRoomMessageFocus } from './roomFocus'
 import { MarkdownText } from '@/components/chat/MarkdownText'
 import { PaneHeader } from '@/components/layout/PaneHeader'
 import {
@@ -32,7 +35,7 @@ import { NumberStepper } from '@/components/ui/Controls'
 import { TextInput } from '@/components/ui/Field'
 import { GrokBotMark } from '@/components/ui/GrokBotMark'
 import { IconButton } from '@/components/ui/IconButton'
-import { MENU_SURFACE } from '@/components/ui/Menu'
+import { Menu, MenuContent, MenuItem, MenuTrigger, MENU_SURFACE } from '@/components/ui/Menu'
 import { PlatformGlyph } from '@/components/ui/PlatformGlyph'
 import { SegmentedControl } from '@/components/ui/SegmentedControl'
 import { cn } from '@/lib/cn'
@@ -52,7 +55,7 @@ import {
   type RoomReference
 } from './model'
 import { RoomAvatarCluster } from './RoomAvatarCluster'
-import { exportRoomMarkdownFile, NEW_ROOM_ID } from './roomExport'
+import { exportRoomJsonFile, exportRoomMarkdownFile, NEW_ROOM_ID } from './roomExport'
 import {
   addRoom,
   roomSlackDestination,
@@ -620,14 +623,16 @@ const RoomTranscript = memo(function RoomTranscript({
   onExport: (messageId: string) => void
 }) {
   return messages.map((message) => (
-    <RoomMessageRow
-      key={message.id}
-      members={members}
-      message={message}
-      finalDeliverable={message.final === true || message.id === finalId}
-      onMentionReply={onMentionReply}
-      onExport={onExport}
-    />
+    <div key={message.id} data-room-message-id={message.id} tabIndex={-1}
+      className="flex flex-col rounded-lg focus-visible:outline-2 focus-visible:outline-accent-600">
+      <RoomMessageRow
+        members={members}
+        message={message}
+        finalDeliverable={message.final === true || message.id === finalId}
+        onMentionReply={onMentionReply}
+        onExport={onExport}
+      />
+    </div>
   ))
 })
 
@@ -656,6 +661,7 @@ export function RoomView({ id }: { id: string }) {
   const [multiline, setMultiline] = useState(false)
   const [mentionCursor, setMentionCursor] = useState(0)
   const transcriptRef = useRef<HTMLDivElement>(null)
+  const followLatest = useRef(true)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   const resize = useCallback(() => {
@@ -670,10 +676,26 @@ export function RoomView({ id }: { id: string }) {
     resize()
   }, [id, text, resize])
 
+  useLayoutEffect(() => {
+    followLatest.current = true
+    const receiveFocus = () => {
+      const messageId = takeRoomMessageFocus(id)
+      if (!messageId) return
+      const row = transcriptRef.current?.querySelector<HTMLElement>(`[data-room-message-id="${CSS.escape(messageId)}"]`)
+      if (row) {
+        followLatest.current = false
+        revealTranscriptRow(row)
+      }
+    }
+    receiveFocus()
+    window.addEventListener(ROOM_FOCUS_EVENT, receiveFocus)
+    return () => window.removeEventListener(ROOM_FOCUS_EVENT, receiveFocus)
+  }, [id])
+
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
       const transcript = transcriptRef.current
-      if (transcript) transcript.scrollTop = transcript.scrollHeight
+      if (transcript && followLatest.current) transcript.scrollTop = transcript.scrollHeight
     })
     return () => cancelAnimationFrame(frame)
   }, [id, room?.messages.length, speaker])
@@ -829,13 +851,17 @@ export function RoomView({ id }: { id: string }) {
 
         {/* Quiet Icon-Only Right Actions */}
         <div className="no-drag flex min-w-0 flex-1 items-center justify-end gap-1">
+          <TranscriptSearchButton />
           {room.messages.length > 0 && (
-            <IconButton
-              label={room.finalId ? '导出共识 Markdown' : '导出讨论记录'}
-              onClick={() => exportRoomMarkdownFile(room)}
-            >
-              <ArkExportDocSvg />
-            </IconButton>
+            <Menu>
+              <MenuTrigger asChild>
+                <IconButton label={t('Export conversation')}><ArkExportDocSvg /></IconButton>
+              </MenuTrigger>
+              <MenuContent align="end">
+                <MenuItem onSelect={() => exportRoomMarkdownFile(room)}>{t('Download Markdown (.md)')}</MenuItem>
+                <MenuItem onSelect={() => exportRoomJsonFile(room)}>{t('Download JSON (.json)')}</MenuItem>
+              </MenuContent>
+            </Menu>
           )}
           <IconButton
             label={t(room.pinned ? 'Unpin from sidebar' : 'Pin to sidebar')}
@@ -858,6 +884,7 @@ export function RoomView({ id }: { id: string }) {
         </div>
       </PaneHeader>
 
+      <TranscriptSearchBar conversationId={id} messages={room.messages} focusMessage={focusRoomMessage} />
       {error && (
         <div className="mx-auto mt-2 flex max-w-[780px] flex-wrap items-center gap-2 px-4">
           <p role="alert" className="text-[12.5px] text-status-error">
@@ -907,7 +934,10 @@ export function RoomView({ id }: { id: string }) {
           </div>
         </div>
       ) : (
-        <div ref={transcriptRef} className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
+        <div ref={transcriptRef} onScroll={(event) => {
+          const view = event.currentTarget
+          followLatest.current = view.scrollHeight - view.scrollTop - view.clientHeight < 120
+        }} className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
           <div className="flex flex-col gap-5">
             <RoomTranscript
               members={room.members}
