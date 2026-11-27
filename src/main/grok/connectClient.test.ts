@@ -176,8 +176,19 @@ describe('GrokConnectClient (Sand 0.79.3 wire protocol)', () => {
       }
     })
 
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const request = new Request(input, init)
+      expect(request.headers.get('content-type')).toBe('application/connect+json')
+      const requestBytes = Buffer.from(await request.arrayBuffer())
+      expect(requestBytes).toEqual(encodeConnectFrame(0, {
+        cursors: [{ agent_id: 'agent-1', after_updated_seq: '4' }],
+        include_unlisted_agents: true,
+        inline_body_max_bytes: 262_144
+      }))
+      return new Response(stream, { status: 200 })
+    })
     const client = new GrokConnectClient({
-      fetchImpl: (async () => new Response(stream, { status: 200 })) as typeof fetch,
+      fetchImpl,
       auth: { accessToken: 'tok_redacted_test', machineId: 'machine-1' }
     })
 

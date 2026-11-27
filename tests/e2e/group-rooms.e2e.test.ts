@@ -10,9 +10,12 @@ vi.mock('electron', async () => {
 import { adapterRegistry } from '@adapters/registry'
 import { AntigravityAdapter } from '@adapters/antigravity/AntigravityAdapter'
 import { GrokBotAdapter } from '@adapters/grokbot/GrokBotAdapter'
+import type { GrokRequest } from '@adapters/grokbot/grokRequests'
 import { DotAdapter } from '@adapters/dot/DotAdapter'
 import { setGrokAuth } from '@adapters/grokbot/tokenStore'
 import { runDotRpc } from '@main/dot/dotIpc'
+import { GrokConnectClient } from '@main/grok/connectClient'
+import { watchUntilReply } from '@main/grok/grokRpc'
 import { importDotCredentialsFromRaw, getStoredDotAccount } from '@main/dot/dotClient'
 import { partitionForAccount } from '@main/webContentsViewManager'
 import { mentions, roomMarkdown, type CollabRoom } from '@/rooms/model'
@@ -213,6 +216,69 @@ describe('Area 3: Group Creation, Conversation & Single-Bot Remove/Move', () => 
     )
     expect(listCallCount).toBeGreaterThanOrEqual(2)
     expect(received[0]!.text).toContain('Hydrated Grok Room Reply')
+  })
+
+  it('posts the Grok reply to the room when only transcript history contains it', async () => {
+    const accountId = 'grok-room-recovery'
+    const botId = 'grok-room-bot'
+    const controller = new AbortController()
+    const sent: string[] = []
+    const client = new GrokConnectClient({
+      auth: { accessToken: 'fixture' },
+      fetchImpl: async (input) => {
+        const url = String(input)
+        if (url.endsWith('/WatchGrokBotTranscripts')) {
+          return new Response(new ReadableStream<Uint8Array>())
+        }
+        if (url.endsWith('/ListGrokBotTranscriptEntries')) {
+          return Response.json({ entries: [
+            { entry_id: 'echo', client_nonce: sent[0], seq: '10', kind: 'message', content: 'Room prompt' },
+            { entry_id: 'answer', seq: '11', kind: 'send-message', content: 'Recovered room answer' }
+          ] })
+        }
+        throw new Error(`Unexpected mock request: ${url}`)
+      }
+    })
+    vi.stubGlobal('window', { electron: { grok: {
+      onEvent: () => () => {},
+      rpc: async (req: GrokRequest) => {
+        if (req.op === 'listAgents') return { ok: true, data: { agents: [{ id: 'agent' }] } }
+        if (req.op === 'sendUserMessage') sent.push(req.messageId)
+        if (req.op === 'watchUntilReply') return { ok: true, data: await watchUntilReply(client, {
+          ...req, sessionId: req.sessionId ?? '', signal: controller.signal
+        }) }
+        return { ok: true, data: {} }
+      }
+    } } })
+    setGrokAuth({ accountId, signedIn: true })
+    const grok = new GrokBotAdapter()
+    await grok.connect(accountId)
+    vi.spyOn(adapterRegistry, 'get').mockReturnValue(grok)
+    useBotStore.setState({
+      bots: [
+        { id: botId, name: 'Grok', platformId: 'grok', selectedAgentId: 'agent', accountIds: [accountId], activeAccountId: accountId } as Bot,
+        { id: 'observer', name: 'Observer', platformId: 'dot', accountIds: ['observer-account'], activeAccountId: 'observer-account' } as Bot
+      ],
+      accounts: {
+        [accountId]: { id: accountId, platformId: 'grok', displayName: 'Grok', handle: 'fixture', status: 'online' },
+        'observer-account': { id: 'observer-account', platformId: 'dot', displayName: 'Observer', handle: 'fixture', status: 'online' }
+      }
+    })
+    const room = addRoom('协作室回传测试', [botId, 'observer'], 'manual', 4)
+    vi.useFakeTimers()
+    const turn = submitBrief(room.id, '@Grok answer in this room')
+    try {
+      await vi.advanceTimersByTimeAsync(8_000)
+      const messages = useRooms.getState().rooms.find((item) => item.id === room.id)?.messages
+      expect(messages?.filter((item) => item.authorBotId === botId)).toEqual([
+        expect.objectContaining({ text: 'Recovered room answer' })
+      ])
+      expect(sent).toHaveLength(1)
+    } finally {
+      controller.abort()
+      await turn
+      vi.useRealTimers()
+    }
   })
 
   it('E2E-T1-A3-04: Dot Room botId Non-Overwrite & native Thread Continuity', async (ctx) => {

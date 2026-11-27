@@ -61,12 +61,13 @@ export function isGrokSendAnchor(entry: ParsedGrokTranscriptEntry, messageId: st
 export async function readGrokTranscriptGap(
   client: GrokConnectClient,
   scope: { agentId: string; sessionId: string },
-  opts: { floor: bigint; signal: AbortSignal; stopAt?: (entry: ParsedGrokTranscriptEntry) => boolean }
+  opts: { floor: bigint; signal: AbortSignal; stopAt?: (entry: ParsedGrokTranscriptEntry) => boolean; maxPages?: number }
 ): Promise<{ entries: ParsedGrokTranscriptEntry[]; generation?: number; watermark: string }> {
   const entries: ParsedGrokTranscriptEntry[] = []
   let generation: number | undefined
   let watermark = '0'
   let beforeSeq: string | undefined
+  let pagesLeft = opts.maxPages ?? Infinity
   do {
     opts.signal.throwIfAborted()
     const page = asObj(await client.listTranscriptEntries({ ...scope, beforeSeq, limit: 40 }, opts.signal)) ?? {}
@@ -85,7 +86,7 @@ export async function readGrokTranscriptGap(
       return opts.stopAt?.(entry) || (seq > 0n && seq <= opts.floor)
     })) break
     beforeSeq = nextTranscriptPage(page, batch, beforeSeq)
-  } while (beforeSeq)
+  } while (beforeSeq && --pagesLeft > 0)
   return { entries: entries.sort(compareGrokEntries), generation, watermark }
 }
 
