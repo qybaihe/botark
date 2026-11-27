@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { persist, type PersistStorage } from 'zustand/middleware'
 import { adapterRegistry } from '@adapters/registry'
-import { AdapterError, type ConnectionStatus, type SendReceipt } from '@adapters/types'
+import { AdapterError, type ConnectionStatus, type IncomingMessage, type SendReceipt } from '@adapters/types'
 import { createId } from '@shared/id'
 import { getBridge } from '@/lib/bridge'
 import { cancelPlatformTurn, useBotStore } from '@/store/botStore'
@@ -10,10 +10,12 @@ import type { Bot } from '@/types'
 import {
   classifyRoomReply,
   freshRoomSession,
+  isFinal,
   mentions,
   normalizeMentionName,
   refusesRoomFrame,
   roomRecipient,
+  stripFinalPrefix,
   turnPrompt,
   type CollabRoom,
   type RoomMember,
@@ -38,6 +40,7 @@ interface RoomState {
   slackDestinations: Record<string, SlackDestination | undefined>
   rooms: CollabRoom[]
   speakers: Record<string, string | undefined>
+  liveReplies: Record<string, RoomMessage | undefined>
   turnProgress: Record<string, RoomTurnProgress | undefined>
   errors: Record<string, string | undefined>
 }
@@ -85,6 +88,7 @@ export const useRooms = create<RoomState>()(
     (): RoomState => ({
       rooms: [],
       speakers: {},
+      liveReplies: {},
       turnProgress: {},
       errors: {},
       slackDestinations: {},
@@ -336,6 +340,7 @@ export function stopRoom(id: string) {
   run?.finish()
   useRooms.setState((s) => ({
     speakers: { ...s.speakers, [id]: undefined },
+    liveReplies: { ...s.liveReplies, [id]: undefined },
     turnProgress: { ...s.turnProgress, [id]: undefined }
   }))
 }
@@ -630,7 +635,24 @@ export function roomFailureNotice(name: string, delivered: boolean): string {
   return delivered ? `${name} 已收到消息，本轮还没有回复。` : `${name} 本轮未送达。`
 }
 
-async function memberReply(room: CollabRoom, member: RoomMember, trigger: RoomMessage, signal: AbortSignal) {
+type RoomIncomingReply = Pick<IncomingMessage, 'text' | 'media' | 'agentId' | 'sessionId'>
+
+function collectRoomReply(incoming: Iterable<RoomIncomingReply>, member: RoomMember, sessionId?: string) {
+  const messages = [...incoming]
+  const text = messages.filter((m) => m.text.trim()).map((m) => m.text).join('\n\n')
+  const media = [...new Map(messages.flatMap((m) => (m.media ?? []).map((part) => [part.path, part] as const))).values()]
+  const sourceMessage = messages.find((m) => m.media?.length ||
+    (member.platform === 'grok' && /grok(?:att|store|doc):\/\//i.test(m.text)))
+  const mediaSource = sourceMessage ? {
+    accountId: member.accountId,
+    platform: member.platform,
+    agentId: sourceMessage?.agentId ?? member.agentId,
+    sessionId: sourceMessage?.sessionId ?? sessionId
+  } : undefined
+  return { text, media, mediaSource }
+}
+
+async function memberReply(room: CollabRoom, member: RoomMember, trigger: RoomMessage, postId: string, signal: AbortSignal) {
   const adapter = adapterRegistry.get(member.platform)
   const bot = useBotStore
     .getState()
@@ -660,12 +682,28 @@ async function memberReply(room: CollabRoom, member: RoomMember, trigger: RoomMe
   activeAccounts.add(lockKey)
   const conversationId = 'room-turn-' + createId('turn')
   let accepted = false
-  const replies = new Map<string, string>()
+  const replies = new Map<string, RoomIncomingReply>()
   const unsubscribe = adapter.onMessage((m) => {
-    if (m.conversationId === conversationId && m.accountId === member.accountId && m.text.trim())
-      replies.set(m.id, m.text)
+    if (m.conversationId === conversationId && m.accountId === member.accountId && (m.text.trim() || m.media?.length)) {
+      replies.set(m.id, m)
+    }
   })
   let sessionId = member.sessionId
+  const live = new Map<string, RoomIncomingReply>()
+  const unsubscribeLive = member.platform === 'grok' ? getBridge()?.grok?.onEvent?.((event) => {
+    if (signal.aborted || event.type !== 'stream' || event.conversationId !== conversationId ||
+        event.accountId !== member.accountId || (member.agentId && event.agentId !== member.agentId)) return
+    const text = stripFinalPrefix(event.text)
+    if (text.trim() || event.media?.length) {
+      live.set(event.messageId, { text, media: event.media, agentId: event.agentId, sessionId: event.sessionId })
+    } else if (!live.delete(event.messageId)) {
+      return
+    }
+    const draft = collectRoomReply(live.values(), member, sessionId)
+    useRooms.setState((s) => ({ liveReplies: { ...s.liveReplies, [room.id]: live.size
+      ? { id: postId, author: member.name, authorBotId: member.botId, ...draft }
+      : undefined } }))
+  }) : undefined
   const hermesSessionKey = member.platform === 'hermes'
     ? member.hermesSessionKey || `${room.id}-${member.botId}` : undefined
   const cancel = () => {
@@ -753,9 +791,14 @@ async function memberReply(room: CollabRoom, member: RoomMember, trigger: RoomMe
         )
     })
     signal.throwIfAborted()
-    const text = [...replies.values()].join('\n\n')
-    if (!text) throw new RoomTurnError(NO_REPLY_ERROR, true)
-    return { text, sessionId: receipt.sessionId || sessionId, hermesSessionKey }
+    const resolvedSessionId = receipt.sessionId || sessionId
+    const incoming = [...replies.values()]
+    const reply = collectRoomReply(incoming, member, resolvedSessionId)
+    if (!reply.text && !reply.media.length) throw new RoomTurnError(NO_REPLY_ERROR, true)
+    // Interpret a final marker from its own bubble while retaining earlier replies.
+    const tail = incoming.findLast((message) => message.text.trim())?.text
+    const finalBubble = member.platform === 'grok' && tail && isFinal(tail) && !isFinal(reply.text) ? tail : undefined
+    return { ...reply, finalBubble, sessionId: resolvedSessionId, hermesSessionKey }
   } catch (error) {
     if (signal.aborted || error instanceof RoomTurnError) throw error
     // An adapter's 'no-reply' means the platform took the message even when onAccepted never fired.
@@ -763,6 +806,7 @@ async function memberReply(room: CollabRoom, member: RoomMember, trigger: RoomMe
     throw new RoomTurnError(error instanceof Error ? error.message : String(error), delivered)
   } finally {
     unsubscribe()
+    unsubscribeLive?.()
     activeAccounts.delete(lockKey)
     signal.removeEventListener('abort', cancel)
   }
@@ -844,7 +888,8 @@ export async function submitBrief(
         speakers: { ...s.speakers, [id]: member.name },
         turnProgress: { ...s.turnProgress, [id]: { turn: turn + 1, limit: current.limit } }
       }))
-      const pending = memberReply(current, member, next.trigger, signal)
+      const postId = createId('post')
+      const pending = memberReply(current, member, next.trigger, postId, signal)
       pendingTurns.set(pendingKey, pending)
       let reply: Awaited<typeof pending>
       try {
@@ -860,7 +905,10 @@ export async function submitBrief(
           id: createId('post'), author: 'BotArk', notice: true,
           text: roomFailureNotice(member.name, delivered), createdAt: Date.now()
         }
-        update(id, (r) => ({ ...r, messages: [...r.messages, notice] }))
+        useRooms.setState((s) => ({
+          rooms: s.rooms.map((r) => r.id === id ? { ...r, messages: [...r.messages, notice] } : r),
+          liveReplies: { ...s.liveReplies, [id]: undefined }
+        }))
         if (coordinator && !isQueued(coordinator.botId)) queue.push({ member: coordinator, trigger: notice })
         continue
       } finally {
@@ -870,21 +918,27 @@ export async function submitBrief(
       const latest = roomById(id)
       if (!latest) break
       // Use the roster from the prompt to resolve names, then deliver by current bot ID.
-      const classified = classifyRoomReply(reply.text, member.botId, current.members, latest)
+      const classified = classifyRoomReply(reply.finalBubble ?? reply.text, member.botId, current.members, latest, reply.media.length > 0)
       const currentMembers = new Map(latest.members.map((m) => [m.botId, m]))
       const targets = classified.kind === 'post' ? classified.botIds : []
       const done = classified.kind === 'final'
       const toolRequest = classified.kind === 'tool'
+      const postText = reply.finalBubble
+        ? [done ? '[FINAL]' : '', reply.text.slice(0, -reply.finalBubble.length).trimEnd(),
+            done ? stripFinalPrefix(classified.text) : classified.text].filter(Boolean).join('\n\n')
+        : classified.text
       const post: RoomMessage = {
-        id: createId('post'),
+        id: postId,
         author: member.name,
         authorBotId: member.botId,
         ...(done ? { final: true } : {}),
-        ...(toolRequest ? { localOnly: true } : {}),
-        text: classified.text,
+        ...(toolRequest || (reply.media.length && !stripFinalPrefix(postText).trim()) ? { localOnly: true } : {}),
+        ...(reply.media.length ? { media: reply.media } : {}),
+        ...(reply.mediaSource ? { mediaSource: reply.mediaSource } : {}),
+        text: postText,
         createdAt: Date.now()
       }
-      const appendPost = Boolean(post.text || targets.length)
+      const appendPost = Boolean(post.text || post.media?.length || targets.length)
       const cursor = reply.sessionId || reply.hermesSessionKey ? latest.messages.length + Number(appendPost) : 0
       const storedMember = currentMembers.get(member.botId)
       const members = storedMember && (storedMember.cursor !== cursor || storedMember.sessionId !== reply.sessionId ||
@@ -893,11 +947,14 @@ export async function submitBrief(
           ...m, cursor, sessionId: reply.sessionId, hermesSessionKey: reply.hermesSessionKey
         } : m)
         : latest.members
-      update(id, (r) => ({
-        ...r,
-        finalId: done ? post.id : undefined,
-        messages: appendPost ? [...r.messages, post] : r.messages,
-        members
+      useRooms.setState((s) => ({
+        rooms: s.rooms.map((r) => r.id === id ? {
+          ...r,
+          finalId: done ? post.id : undefined,
+          messages: appendPost ? [...r.messages, post] : r.messages,
+          members
+        } : r),
+        liveReplies: { ...s.liveReplies, [id]: undefined }
       }))
       if (done) break
       if (toolRequest) {
@@ -963,6 +1020,7 @@ export async function submitBrief(
       runs.delete(id)
       useRooms.setState((s) => ({
         speakers: { ...s.speakers, [id]: undefined },
+        liveReplies: { ...s.liveReplies, [id]: undefined },
         turnProgress: { ...s.turnProgress, [id]: undefined }
       }))
     }

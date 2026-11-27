@@ -78,6 +78,7 @@ function fail(error: unknown): GrokRpcResponse {
 }
 
 const GROK_REPLY_SETTLE_MS = 12_000
+const GROK_ROOM_PROGRESS_GRACE_MS = 60_000
 const GROK_REPLY_HISTORY_INTERVAL_MS = 4_000
 const GROK_REPLY_HISTORY_TIMEOUT_MS = 6_000
 const GROK_REPLY_HISTORY_MAX_PAGES = 8
@@ -110,6 +111,13 @@ interface GrokReplyBubble {
   media?: MuseMediaPartView[]
 }
 
+function isRoomProgressReply(bubble: GrokReplyBubble): boolean {
+  const text = bubble.text.trim()
+  if (!text || text.length > 160 || bubble.media?.length || bubble.widgets?.length || bubble.richWidgets?.length) return false
+  if (/\[(?:FINAL|HANDOFF|TOOL)\]|(?:https?|grok(?:att|store|doc)):\/\/|\r?\n|已经|已完成|已生成|已整理|查到了|如下|见附件|\b(?:here (?:is|are)|attached|finished)\b/i.test(text)) return false
+  return /(?:我(?:先|来|会|将|这就|正在)|让我)[^。！？\n]{0,24}(?:查|搜|检索|整理|生成|制作|准备|撰写|导出|汇总)|稍(?:等|候)|\b(?:let me|i(?:['’]ll| will))\s+(?:check|look|search|prepare|gather|compile|create|generate|draft)\b/i.test(text)
+}
+
 export async function watchUntilReply(
   client: GrokConnectClient,
   args: {
@@ -134,6 +142,7 @@ export async function watchUntilReply(
   const credentialSignal = activeGrokCredentialSignal(args.accountId)
   const signal = AbortSignal.any([ac.signal, credentialSignal, ...(args.signal ? [args.signal] : [])])
   const { accountId, agentId, sessionId } = args
+  const isRoomTurn = args.conversationId?.startsWith('room-turn-') === true
   const watchHandle = getGrokAccountWatch(accountId)
   const streamsInBackground = watchHandle?.watchesSession(agentId, sessionId) ?? false
   const revisions = new GrokEntryRevisions()
@@ -154,6 +163,7 @@ export async function watchUntilReply(
   let turnFailed: { code: string; summary: string } | undefined
   let isAgentRunning = false
   let settleTimer: ReturnType<typeof setTimeout> | undefined
+  let roomProgressUntil: number | undefined
 
   const assertCurrent = () => {
     signal.throwIfAborted()
@@ -165,6 +175,12 @@ export async function watchUntilReply(
   )
   const armSettle = (ms: number) => {
     clearTimeout(settleTimer)
+    if (isRoomTurn && bubbles.size && [...bubbles.values()].every(({ bubble }) => isRoomProgressReply(bubble))) {
+      roomProgressUntil ??= Date.now() + GROK_ROOM_PROGRESS_GRACE_MS
+      ms = Math.max(0, roomProgressUntil - Date.now())
+    } else {
+      roomProgressUntil = undefined
+    }
     settleTimer = setTimeout(() => ac.abort(), ms)
   }
 
@@ -266,7 +282,9 @@ export async function watchUntilReply(
         collectedTools.set(entry.toolCall.id, entry.toolCall)
         continue
       }
-      const media = await watchHandle?.resolveMediaUrls(client, agentId, sessionId, entry.media, readSignal) ?? entry.media
+      // Room messages retain file references so the original account can resolve them on demand.
+      const media = isRoomTurn ? entry.media
+        : await watchHandle?.resolveMediaUrls(client, agentId, sessionId, entry.media, readSignal) ?? entry.media
       assertCurrent()
       if (!entry.text && !entry.widgets?.length && !entry.richWidgets?.length && !media?.length) continue
       const messageId = `grok_${entry.entryId}`
@@ -276,7 +294,7 @@ export async function watchUntilReply(
       }
       bubbles.set(messageId, { entry, bubble })
       receivedReply = true
-      if (!streamsInBackground) broadcastGrokEvent({
+      if (isRoomTurn || !streamsInBackground) broadcastGrokEvent({
         type: 'stream', accountId, conversationId: args.conversationId, agentId,
         sessionId: sessionId || undefined, ...bubble, done: !entry.isStreaming
       })
@@ -298,6 +316,7 @@ export async function watchUntilReply(
     anchorOrder = undefined
     nextPrompt = undefined
     nextAnchorLookupAt = 0
+    roomProgressUntil = undefined
     clearTimeout(settleTimer)
   }
 
@@ -374,8 +393,11 @@ export async function watchUntilReply(
             if (state && matchesScope(state)) {
               isAgentRunning = Boolean(state['isRunning'] ?? state['is_running']) ||
                 Boolean(state['isComposingMessage'] ?? state['is_composing_message'])
-              if (isAgentRunning) clearTimeout(settleTimer)
-              else if ([...bubbles.values()].some(({ entry }) => !entry.isStreaming)) armSettle(1_800)
+              if (isAgentRunning) {
+                if (roomProgressUntil === undefined) clearTimeout(settleTimer)
+              } else if ([...bubbles.values()].some(({ entry }) => !entry.isStreaming)) {
+                armSettle(1_800)
+              }
             }
             const cleared = asObj(frame['cleared'])
             if (cleared && matchesScope(cleared)) {

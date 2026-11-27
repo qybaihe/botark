@@ -343,7 +343,7 @@ function renderInline(
       } else if (
         onFileLinkClick &&
         (href.startsWith('workspace/') ||
-          /^(sediment|dotfile|dotatt|harkatt|harkfile):\/\//i.test(href) ||
+          /^(sediment|dotfile|dotatt|harkatt|harkfile|grokatt|grokstore|grokdoc):\/\//i.test(href) ||
           /\.(md|markdown|txt|json|csv|html|htm|pdf|png|jpe?g|gif|webp|svg|py|ts|tsx|js|sh|sql|yaml|yml)$/i.test(href))
       ) {
         nodes.push(

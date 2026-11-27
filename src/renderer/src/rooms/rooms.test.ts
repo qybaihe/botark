@@ -1,7 +1,9 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { adapterRegistry } from '@adapters/registry'
 import { AdapterError, type IncomingMessage, type OutgoingMessage, type PlatformAdapter, type SendReceipt } from '@adapters/types'
+import type { GrokMainEvent } from '@shared/ipc'
 import type { Bot } from '@/types'
+import { buildRoomJson } from '@/lib/conversationExport'
 import { useBotStore } from '@/store/botStore'
 import { mentions, roomMarkdown, splitMentionSegments, stripFinalPrefix, turnPrompt, type CollabRoom, type RoomMember } from './model'
 import {
@@ -19,7 +21,7 @@ import {
 const members = ['Muse', 'Dot'].map((name) => ({ name, botId: name, platform: 'dot' as const, accountId: name, cursor: 0 }))
 function fixture(
   mode: CollabRoom['mode'],
-  respond: (m: OutgoingMessage) => Promise<string | { text: string; sessionId?: string }>,
+  respond: (m: OutgoingMessage) => Promise<string | Pick<IncomingMessage, 'text' | 'sessionId' | 'media'>>,
   limit = 8,
   roster: RoomMember[] = members
 ) {
@@ -34,11 +36,11 @@ function fixture(
     onMessage: (listener: typeof emit) => { emit = listener; return () => {} },
     sendMessage: async (m: OutgoingMessage): Promise<SendReceipt> => {
       const response = await respond(m)
-      const { text, sessionId } = typeof response === 'string' ? { text: response, sessionId: undefined } : response
-      const message = { ...m, text, createdAt: 1, id: 'fixture' }
+      const data = typeof response === 'string' ? { text: response } : response
+      const message = { ...m, ...data, createdAt: 1, id: 'fixture' }
       emit({ ...message, conversationId: 'private-chat', text: '@Dot wrong transcript' })
       emit(message)
-      return { messageId: 'receipt', acceptedAt: 1, sessionId }
+      return { messageId: 'receipt', acceptedAt: 1, sessionId: data.sessionId }
     }
   } as unknown as PlatformAdapter)
 }
@@ -46,6 +48,54 @@ afterEach(() => {
   for (const room of useRooms.getState().rooms) stopRoom(room.id)
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
+})
+
+it('shows Grok text and files before a room turn completes and stores one final reply', async () => {
+  let emitLive: ((event: GrokMainEvent) => void) | undefined
+  const unsubscribe = vi.fn()
+  vi.stubGlobal('window', { electron: { grok: { onEvent: (listener: typeof emitLive) => {
+    emitLive = listener
+    return unsubscribe
+  } } } })
+  const grok: RoomMember = {
+    ...members[0]!, botId: 'grok', name: 'Grok', platform: 'grok',
+    agentId: 'fixture-agent', sessionId: 'fixture-session'
+  }
+  const media = [{ kind: 'file' as const, path: 'grokatt://fixture/report.pdf', name: 'report.pdf' }]
+  let finishResponse!: () => void
+  const response = new Promise<void>((resolve) => { finishResponse = resolve })
+  let request: OutgoingMessage | undefined
+  fixture('manual', async (message) => {
+    request = message
+    await response
+    return { text: '[FINAL]\n请查收报告', media, sessionId: grok.sessionId }
+  }, 8, [grok, members[1]!])
+  const run = submitBrief('room', '@Grok 生成报告')
+  try {
+    await vi.waitFor(() => expect(request).toBeDefined())
+    const send = request!
+    const event = {
+      type: 'stream' as const, accountId: send.accountId, agentId: send.agentId!,
+      sessionId: send.sessionId, messageId: 'fixture-live', text: '我来整理资料', done: false
+    }
+    emitLive?.({ ...event, conversationId: 'another-turn' })
+    expect(useRooms.getState().liveReplies?.['room']).toBeUndefined()
+    emitLive?.({ ...event, conversationId: send.conversationId })
+    expect(useRooms.getState().liveReplies?.['room']).toMatchObject({ text: event.text })
+    emitLive?.({ ...event, conversationId: send.conversationId, text: '请查收报告', media, done: true })
+    expect(useRooms.getState().liveReplies?.['room']).toMatchObject({ text: '请查收报告', media })
+    expect(useRooms.getState().rooms[0]?.messages.filter((message) => message.authorBotId)).toEqual([])
+  } finally {
+    finishResponse()
+    await run
+  }
+  expect(unsubscribe).toHaveBeenCalledOnce()
+  expect(useRooms.getState().liveReplies?.['room']).toBeUndefined()
+  const room = useRooms.getState().rooms[0]!
+  expect(room.messages.filter((message) => message.authorBotId)).toEqual([
+    expect.objectContaining({ text: '[FINAL]\n请查收报告', media, final: true })
+  ])
+  expect(buildRoomJson(room)).not.toContain('mediaSource')
 })
 it('routes complete names once and ignores email addresses', () => {
   expect(mentions('x@Muse.io @MuseExtra @Dot @Muse @Dot', members).map((m) => m.name)).toEqual(['Dot', 'Muse'])

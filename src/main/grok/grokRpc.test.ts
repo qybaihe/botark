@@ -17,6 +17,46 @@ const reply = (id: string, seq: string, fields: Record<string, unknown> = {}) =>
   entry_id: id, seq, kind: 'send-message', content: id, ...fields
 })
 
+it('waits for a delayed group file link after a Grok progress reply', async () => {
+  vi.useFakeTimers()
+  const controller = new AbortController()
+  const progress = reply('progress', '9', { content: '好的，我来查阅资料，整理后发给大家。' })
+  const deliverable = reply('deliverable', '10', {
+    content: '[FINAL]\n[报告](https://example.test/report.pdf)'
+  })
+  const watchTranscripts = async function* (_params: unknown, signal: AbortSignal) {
+    yield rows([user, progress])
+    yield { agent_state: { ...wireScope, is_running: false } }
+    if (!signal.aborted) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 29_000)
+        signal.addEventListener('abort', () => { clearTimeout(timer); resolve() }, { once: true })
+      })
+    }
+    if (!signal.aborted) yield rows([deliverable])
+  }
+  const listTranscriptEntries = async () => ({ entries: [user, progress] })
+  const delivered = vi.fn()
+  const result = watchUntilReply({ watchTranscripts, listTranscriptEntries } as unknown as GrokConnectClient, {
+    ...scope, conversationId: 'room-turn-fixture', afterMessageId: 'nonce', timeoutMs: 90_000, signal: controller.signal
+  }).then(delivered, () => undefined)
+  try {
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(delivered).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(28_000)
+    expect(delivered).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      messages: [
+        expect.objectContaining({ messageId: 'grok_progress', text: progress.content }),
+        expect.objectContaining({ messageId: 'grok_deliverable', text: deliverable.content })
+      ]
+    }))
+  } finally {
+    controller.abort()
+    await result
+    vi.useRealTimers()
+  }
+})
+
 it('recovers a completed zero-cursor reply when the replay omits its user anchor', async () => {
   const listTranscriptEntries = vi.fn(async () => ({ entries: [user] }))
   const getSendStatus = vi.fn(async () => ({ echo_entry_id: 'echo' }))

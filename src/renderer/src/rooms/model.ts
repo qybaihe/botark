@@ -1,6 +1,7 @@
 import type { PlatformId } from '@adapters/types'
 import { createId } from '@shared/id'
 import { isToolRequest } from './toolRequests'
+import type { ChatMediaPart } from '@/types'
 
 export interface RoomMember {
   botId: string
@@ -29,6 +30,8 @@ export interface RoomMessage {
   id: string
   author: string
   text: string
+  media?: ChatMediaPart[]
+  mediaSource?: Pick<RoomMember, 'accountId' | 'platform' | 'agentId' | 'sessionId'>
   references?: RoomReference[]
   authorBotId?: string
   notice?: boolean
@@ -195,7 +198,7 @@ type RoomReply =
   | { kind: 'final'; text: string }
   | { kind: 'post'; text: string; botIds: string[] }
 
-export function classifyRoomReply(reply: string, speakerId: string, roster: RoomMember[], room: CollabRoom): RoomReply {
+export function classifyRoomReply(reply: string, speakerId: string, roster: RoomMember[], room: CollabRoom, hasMedia = false): RoomReply {
   if (isToolRequest(reply)) return { kind: 'tool', text: reply }
   const isCoordinator = speakerId === room.coordinatorId
   const canDelegate = isCoordinator || (!room.coordinatorId && room.mode === 'auto')
@@ -204,7 +207,7 @@ export function classifyRoomReply(reply: string, speakerId: string, roster: Room
 
   if ((!room.coordinatorId || isCoordinator) && isFinal(reply)) {
     const body = stripFinalPrefix(reply)
-    if (!body.trim()) return { kind: 'post', text: body, botIds: [] }
+    if (!body.trim() && !hasMedia) return { kind: 'post', text: body, botIds: [] }
     const target = canDelegate ? directHandoff(body, roster) : undefined
     if (!target || target.botId === speakerId || !room.members.some((m) => m.botId === target.botId)) {
       return { kind: 'final', text: reply }

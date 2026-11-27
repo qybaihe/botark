@@ -19,11 +19,12 @@ export interface NativeDocumentTarget {
   mimeType?: string
   platformId?: string
   agentId?: string
+  sessionId?: string
 }
 
 function documentTargetKey(target: NativeDocumentTarget): string {
   return JSON.stringify([
-    target.platformId, target.accountId, target.agentId, target.path, target.title,
+    target.platformId, target.accountId, target.agentId, target.sessionId, target.path, target.title,
     target.mimeType, target.markdown, target.html
   ])
 }
@@ -108,6 +109,7 @@ async function loadDocument(target: NativeDocumentTarget): Promise<DocumentConte
       accountId: target.accountId,
       op: 'downloadAttachment',
       agentId: target.agentId,
+      sessionId: target.sessionId,
       path: !groupChatId && !isHttpUrl ? rawPath : undefined,
       url: isHttpUrl ? rawPath : undefined,
       groupChatId,

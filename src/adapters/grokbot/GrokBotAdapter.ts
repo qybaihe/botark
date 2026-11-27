@@ -615,7 +615,7 @@ export class GrokBotAdapter implements PlatformAdapter {
           message: {
             ...bubble,
             id: replyId ? (replyId.startsWith('grok_') ? replyId : `grok_${replyId}`) : createId('msg'),
-            conversationId: message.conversationId, accountId: message.accountId,
+            conversationId: message.conversationId, accountId: message.accountId, agentId,
             sessionId: sessionId || undefined, createdAt: Date.now()
           }
         })
