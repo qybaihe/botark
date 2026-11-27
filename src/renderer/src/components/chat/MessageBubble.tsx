@@ -32,28 +32,30 @@ function DeliveryState({ message, onRetry }: Pick<MessageBubbleProps, 'message' 
   switch (message.delivery) {
     case 'sending':
       return (
-        <span className="inline-flex items-center gap-1">
-          <Clock3 className="size-3" aria-hidden /> {t('Sending…')}
+        <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap">
+          <Clock3 className="size-3 shrink-0" aria-hidden /> {t('Sending…')}
         </span>
       )
     case 'accepted':
       return (
-        <span className="inline-flex items-center gap-1">
-          <Loader2 className="size-3 animate-spin" aria-hidden /> {t('Delivered · replying')}
+        <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap">
+          <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden /> {t('Delivered · replying')}
         </span>
       )
     case 'failed':
       return (
-        <span className="inline-flex items-center gap-1.5 text-status-error-ink">
-          <AlertCircle className="size-3" aria-hidden />
-          {message.error ?? t('Not sent')}
+        <span className="inline-flex min-w-0 max-w-full flex-wrap items-center justify-end gap-x-1.5 gap-y-0.5 text-right text-status-error-ink">
+          <span className="inline-flex min-w-0 max-w-full items-start gap-1">
+            <AlertCircle className="mt-0.5 size-3 shrink-0" aria-hidden />
+            <span className="min-w-0 break-words [overflow-wrap:anywhere]">{message.error ?? t('Not sent')}</span>
+          </span>
           {onRetry && (
             <button
               type="button"
               onClick={() => onRetry(message.id)}
-              className="inline-flex items-center gap-1 rounded px-1 font-medium underline-offset-2 hover:underline"
+              className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded px-1 font-medium underline-offset-2 hover:underline"
             >
-              <RotateCw className="size-3" aria-hidden /> {t('Retry')}
+              <RotateCw className="size-3 shrink-0" aria-hidden /> {t('Retry')}
             </button>
           )}
         </span>
@@ -61,23 +63,25 @@ function DeliveryState({ message, onRetry }: Pick<MessageBubbleProps, 'message' 
     case 'no-reply':
       // Delivered: resending would post the message a second time, so say so.
       return (
-        <span className="inline-flex items-center gap-1.5 text-status-attention-ink">
-          <AlertCircle className="size-3" aria-hidden />
-          {message.error ?? t('Delivered, but no reply')}
+        <span className="inline-flex min-w-0 max-w-full flex-wrap items-center justify-end gap-x-1.5 gap-y-0.5 text-right text-status-attention-ink">
+          <span className="inline-flex min-w-0 max-w-full items-start gap-1">
+            <AlertCircle className="mt-0.5 size-3 shrink-0" aria-hidden />
+            <span className="min-w-0 break-words [overflow-wrap:anywhere]">{message.error ?? t('Delivered, but no reply')}</span>
+          </span>
           {onRetry && message.error !== SEND_STILL_PENDING_TEXT && (
             <button
               type="button"
               onClick={() => onRetry(message.id)}
               title={t('Sends the same message again')}
-              className="inline-flex items-center gap-1 rounded px-1 font-medium underline-offset-2 hover:underline"
+              className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded px-1 font-medium underline-offset-2 hover:underline"
             >
-              <RotateCw className="size-3" aria-hidden /> {t('Send again')}
+              <RotateCw className="size-3 shrink-0" aria-hidden /> {t('Send again')}
             </button>
           )}
         </span>
       )
     case 'sent':
-      return <Check className="size-3" aria-label={t('Sent')} />
+      return <Check className="size-3 shrink-0" aria-label={t('Sent')} />
     default:
       return null
   }
@@ -1216,27 +1220,28 @@ export const MessageBubble = memo(function MessageBubble({
       {(isLastInRun || message.delivery === 'failed' || message.delivery === 'no-reply' || !mine) && (
         <div
           className={cn(
-            'mt-1 flex h-5 items-center gap-2 px-1.5 text-[11px] text-ink-muted transition-opacity duration-150',
+            'mt-1 flex min-h-5 max-w-full flex-wrap items-center gap-x-2 gap-y-1 px-1.5 text-[11px] leading-4 text-ink-muted transition-opacity duration-150',
+            mine && 'max-w-[85%] justify-end',
             message.delivery === 'failed' || message.delivery === 'sending' || message.delivery === 'accepted' || message.delivery === 'no-reply'
               ? 'opacity-100'
               : 'opacity-0 group-hover/msg:opacity-100 group-focus-within/msg:opacity-100'
           )}
         >
-          {accountLabel && <span className="text-ink-secondary">{accountLabel}</span>}
-          {accountLabel && <span aria-hidden>·</span>}
-          <time dateTime={new Date(message.createdAt).toISOString()} className="tabular-nums">
+          {accountLabel && <span className="shrink-0 whitespace-nowrap text-ink-secondary">{accountLabel}</span>}
+          {accountLabel && <span className="shrink-0" aria-hidden>·</span>}
+          <time dateTime={new Date(message.createdAt).toISOString()} className="shrink-0 whitespace-nowrap tabular-nums">
             {formatClock(message.createdAt)}
           </time>
           {mine ? (
-            <div className="flex items-center gap-1.5">
+            <div className="flex min-w-0 max-w-full flex-wrap items-center justify-end gap-x-1.5 gap-y-1">
               {message.text && (
                 <button
                   type="button"
                   onClick={quoteReplyMessage}
                   title="引用回复"
-                  className="inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[11px] text-ink-secondary hover:bg-hover hover:text-ink"
+                  className="inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap rounded-md px-1.5 py-0.5 text-[11px] text-ink-secondary hover:bg-hover hover:text-ink"
                 >
-                  <ArkHandoffCurveSvg className="size-3" />
+                  <ArkHandoffCurveSvg className="size-3 shrink-0" />
                   <span>引用</span>
                 </button>
               )}
@@ -1244,32 +1249,32 @@ export const MessageBubble = memo(function MessageBubble({
             </div>
           ) : (
             message.text && (
-              <div className="flex items-center gap-1">
+              <div className="flex flex-wrap items-center gap-1">
                 <button
                   type="button"
                   onClick={quoteReplyMessage}
                   title="引用此消息回复"
-                  className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-ink-secondary hover:bg-hover hover:text-ink"
+                  className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md px-1.5 py-0.5 text-[11px] text-ink-secondary hover:bg-hover hover:text-ink"
                 >
-                  <ArkHandoffCurveSvg className="size-3" />
+                  <ArkHandoffCurveSvg className="size-3 shrink-0" />
                   <span>引用</span>
                 </button>
                 <button
                   type="button"
                   onClick={copyMessageText}
                   title={t('Copy')}
-                  className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-ink-secondary hover:bg-hover hover:text-ink"
+                  className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md px-1.5 py-0.5 text-[11px] text-ink-secondary hover:bg-hover hover:text-ink"
                 >
-                  {copiedMsg ? <Check className="size-3 text-status-online" /> : <Copy className="size-3" />}
+                  {copiedMsg ? <Check className="size-3 shrink-0 text-status-online" /> : <Copy className="size-3 shrink-0" />}
                   <span>{copiedMsg ? '已复制' : t('Copy')}</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => triggerShareConversation({ botId: message.botId, messageId: message.id })}
                   title="生成共享页面"
-                  className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-ink-secondary hover:bg-hover hover:text-ink"
+                  className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md px-1.5 py-0.5 text-[11px] text-ink-secondary hover:bg-hover hover:text-ink"
                 >
-                  <ArkExportDocSvg className="size-3" />
+                  <ArkExportDocSvg className="size-3 shrink-0" />
                   <span>分享</span>
                 </button>
                 <button
@@ -1283,9 +1288,9 @@ export const MessageBubble = memo(function MessageBubble({
                     })
                   }
                   title="在右侧画布展开阅读"
-                  className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-ink-secondary hover:bg-hover hover:text-ink"
+                  className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md px-1.5 py-0.5 text-[11px] text-ink-secondary hover:bg-hover hover:text-ink"
                 >
-                  <Maximize2 className="size-3" />
+                  <Maximize2 className="size-3 shrink-0" />
                   <span>右侧阅读</span>
                 </button>
                 {botMeta?.platformId === 'grok' && botMeta.selectedAgentId && (

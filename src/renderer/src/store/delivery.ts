@@ -12,6 +12,20 @@ export const SEND_STILL_PENDING_TEXT = "发送超时，可能已经送达；正�
 export const INTERRUPTED_SEND_TEXT = "应用关闭时还没确认送达，可能已经发出；重试前先确认"
 export const INTERRUPTED_REPLY_TEXT = "已送达，但应用关闭时回复还没收完"
 export const ACCEPTED_THEN_FAILED_TEXT = "已送达，但等待回复时出错；重发前先确认对方是否已回复"
+export const SUPERSEDED_REPLY_TEXT = "已送达，后续新消息已接替等待"
+export const SUPERSEDED_SEND_TEXT = "已被后续新消息替代"
+
+const ELECTRON_IPC_ERROR_PREFIX = /^Error invoking remote method '[^']+':\s*(?:[A-Za-z0-9_]*Error:\s*)*/i
+const SUPERSEDED_ERROR_RE = /\bmuse turn superseded\b/i
+
+/** Strip Electron IPC remote-method wrappers and normalize verbose whitespace for inline UI errors. */
+export function formatDeliveryError(error: unknown, fallback = ""): string {
+  const raw = error instanceof Error ? error.message : typeof error === "string" ? error : ""
+  const stripped = raw.replace(ELECTRON_IPC_ERROR_PREFIX, "").replace(/\s+/g, " ").trim()
+  if (!stripped) return fallback
+  if (SUPERSEDED_ERROR_RE.test(stripped)) return SUPERSEDED_SEND_TEXT
+  return stripped
+}
 
 /**
  * Delivery state after `sendMessage` failed. Once the platform accepted the
@@ -22,9 +36,15 @@ export function deliveryAfterError(
   kind: "no-reply" | "timeout" | "other",
   detail: string
 ): { delivery: "failed" | "no-reply"; error: string } {
-  if (kind === "no-reply") return { delivery: "no-reply", error: detail }
-  if (accepted) return { delivery: "no-reply", error: kind === "timeout" ? ACCEPTED_THEN_FAILED_TEXT : `${ACCEPTED_THEN_FAILED_TEXT}（${detail}）` }
-  return { delivery: "failed", error: detail }
+  if (kind === "no-reply") return { delivery: "no-reply", error: formatDeliveryError(detail, detail) }
+  if (SUPERSEDED_ERROR_RE.test(detail)) {
+    return accepted
+      ? { delivery: "no-reply", error: SUPERSEDED_REPLY_TEXT }
+      : { delivery: "failed", error: SUPERSEDED_SEND_TEXT }
+  }
+  const cleanDetail = formatDeliveryError(detail, detail)
+  if (accepted) return { delivery: "no-reply", error: kind === "timeout" ? ACCEPTED_THEN_FAILED_TEXT : `${ACCEPTED_THEN_FAILED_TEXT}（${cleanDetail}）` }
+  return { delivery: "failed", error: cleanDetail }
 }
 
 export const ATTACHMENTS_LOST_TEXT = "附件在重启后已不在内存中，请重新添加后再发送"

@@ -177,6 +177,16 @@ export function extractRequiredMethodPath(errText: string): string | null {
   return candidate
 }
 
+/**
+ * Detect Muse daemon 400 validation errors indicating the endpoint requires a
+ * `{ method, params }` JSON envelope, e.g.:
+ * `{"ok":false,"error":{"code":"invalid_params","message":"\`params\` is required"}}`
+ */
+export function requiresParamsEnvelope(errText: string): boolean {
+  if (!errText) return false
+  return /`params`\s+(?:is\s+required|must\s+be\b)|"params"\s+is\s+required/i.test(errText)
+}
+
 /** Toggle `/api/session/*` <-> `/session/*` when a daemon returns 404 on one prefix. */
 export function computeSessionPathFallback(currentBase: string): string | null {
   if (currentBase.startsWith('/api/session/')) return currentBase.slice('/api'.length)
@@ -215,6 +225,7 @@ export class MuseNativeGateway extends EventEmitter {
   private streams = new Map<bigint, PendingStream>()
   private pathOverrides = new Map<string, string>()
   private bodyMethodOverrides = new Map<string, string>()
+  private bodyParamsEnvelopeOverrides = new Set<string>()
   private heartbeat: ReturnType<typeof setInterval> | null = null
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private attempt = 0
@@ -576,7 +587,7 @@ export class MuseNativeGateway extends EventEmitter {
   private buildRequest(
     method: string,
     params: Record<string, unknown>,
-    override?: { path?: string; bodyMethod?: string }
+    override?: { path?: string; bodyMethod?: string; wrapParams?: boolean }
   ): {
     service: ServiceName
     verb: string
@@ -601,11 +612,24 @@ export class MuseNativeGateway extends EventEmitter {
     const { path, rest } = substitutePath(template, effectiveParams)
     const isGet = spec.httpMethod === 'GET'
     const isEmptyBody = isGet || spec.requestBody === 'empty'
+    const wrapParams = !isEmptyBody && (override?.wrapParams === true || this.bodyParamsEnvelopeOverrides.has(method))
+    let payload: Record<string, unknown> = rest
+    if (wrapParams) {
+      const { method: bodyMethodVal, params: existingInner, ...otherFields } = rest
+      const inner =
+        existingInner && typeof existingInner === 'object' && !Array.isArray(existingInner)
+          ? { ...(existingInner as Record<string, unknown>), ...otherFields }
+          : otherFields
+      payload = {
+        ...(bodyMethodVal !== undefined ? { method: bodyMethodVal } : {}),
+        params: inner
+      }
+    }
     return {
       service: (spec.service ?? 'daemon') as ServiceName,
       verb: spec.httpMethod,
       path: isGet ? path + toQuery(rest, path) : path,
-      body: isEmptyBody ? new Uint8Array(0) : new TextEncoder().encode(JSON.stringify(rest)),
+      body: isEmptyBody ? new Uint8Array(0) : new TextEncoder().encode(JSON.stringify(payload)),
       subscription: !!spec.subscription,
       streamMode: spec.streamMode ?? (spec.subscription ? 'subscription' : 'unary'),
       responseType: spec.responseType,
@@ -666,7 +690,8 @@ export class MuseNativeGateway extends EventEmitter {
     const generation = this.connection.signal
     const pathBefore = this.pathOverrides.get(method)
     const bodyMethodBefore = this.bodyMethodOverrides.get(method)
-    const candidate: { path?: string; bodyMethod?: string } = {}
+    const wrapParamsBefore = this.bodyParamsEnvelopeOverrides.has(method)
+    const candidate: { path?: string; bodyMethod?: string; wrapParams?: boolean } = {}
     while (true) {
       signal?.throwIfAborted()
       generation.throwIfAborted()
@@ -689,6 +714,11 @@ export class MuseNativeGateway extends EventEmitter {
           const sentMethod = candidate.bodyMethod ?? params['method'] ?? this.bodyMethodOverrides.get(method)
           if (required && !candidate.bodyMethod && sentMethod !== required && spec.httpMethod !== 'GET' && spec.requestBody !== 'empty') {
             candidate.bodyMethod = required
+            continue
+          }
+          const alreadyWrapped = candidate.wrapParams === true || this.bodyParamsEnvelopeOverrides.has(method)
+          if (!alreadyWrapped && requiresParamsEnvelope(detail) && spec.httpMethod !== 'GET' && spec.requestBody !== 'empty') {
+            candidate.wrapParams = true
             continue
           }
           if (!candidate.path && !spec.path.includes('{')) {
@@ -739,6 +769,9 @@ export class MuseNativeGateway extends EventEmitter {
         if (candidate.path && this.pathOverrides.get(method) === pathBefore) this.pathOverrides.set(method, candidate.path)
         if (candidate.bodyMethod && this.bodyMethodOverrides.get(method) === bodyMethodBefore) {
           this.bodyMethodOverrides.set(method, candidate.bodyMethod)
+        }
+        if (candidate.wrapParams && this.bodyParamsEnvelopeOverrides.has(method) === wrapParamsBefore) {
+          this.bodyParamsEnvelopeOverrides.add(method)
         }
       }
       return result

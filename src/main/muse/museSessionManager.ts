@@ -1597,7 +1597,7 @@ export class MuseSessionManager {
 
   async startSession(accountId: string): Promise<{ sessionId: string | null }> {
     const { signal } = this.generationFor(accountId).controller
-    const raw = await this.rpc(accountId, 'session.start', { method: '/api/session/start' })
+    const raw = await this.rpc(accountId, 'session.start', { method: '/api/session/start', params: {} })
     signal.throwIfAborted()
     const sessionId = extractStartedSessionId(raw)
     // Both room and direct callers allocate here. Selection happens on history load or send ACK.

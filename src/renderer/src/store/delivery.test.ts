@@ -6,10 +6,13 @@ import {
   createInFlightSet,
   hasLostAttachments,
   deliveryAfterError,
+  formatDeliveryError,
   INTERRUPTED_REPLY_TEXT,
   createSafeStorage,
   INTERRUPTED_SEND_TEXT,
   SEND_STILL_PENDING_TEXT,
+  SUPERSEDED_REPLY_TEXT,
+  SUPERSEDED_SEND_TEXT,
   sanitizePersisted,
   SendTimeoutError,
   toPersistedMessages,
@@ -298,6 +301,21 @@ describe('accepted delivery', () => {
     expect(deliveryAfterError(true, 'timeout', 't').delivery).toBe('no-reply')
     expect(deliveryAfterError(false, 'other', 'boom')).toEqual({ delivery: 'failed', error: 'boom' })
     expect(deliveryAfterError(false, 'no-reply', 'x')).toEqual({ delivery: 'no-reply', error: 'x' })
+  })
+
+  it('strips Electron IPC prefixes and maps Muse turn superseded into concise copy', () => {
+    expect(
+      formatDeliveryError(new Error("Error invoking remote method 'bothub:muse:sessions:start': Error: session.start: HTTP 400"))
+    ).toBe('session.start: HTTP 400')
+    expect(
+      deliveryAfterError(true, 'other', "Error invoking remote method 'bothub:muse:rpc': Error: Muse turn superseded")
+    ).toEqual({ delivery: 'no-reply', error: SUPERSEDED_REPLY_TEXT })
+    expect(
+      deliveryAfterError(false, 'other', "Error invoking remote method 'bothub:muse:rpc': Error: Muse turn superseded")
+    ).toEqual({ delivery: 'failed', error: SUPERSEDED_SEND_TEXT })
+    expect(
+      deliveryAfterError(true, 'other', "Error invoking remote method 'bothub:muse:rpc': Error: socket closed").error
+    ).toContain('（socket closed）')
   })
 
   it('lets only one delivery per message run', () => {

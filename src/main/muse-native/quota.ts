@@ -145,13 +145,16 @@ export function normalizeSubscription(raw: unknown): MuseSubscription | null {
 }
 
 const ACTION_RE =
-  /(?:createServerReference|\.\w+)\(\s*["']([0-9a-f]{40,44})["'][\s\S]{0,200}?["']fetchSubscriptionAction["']/i
+  /(?:createServerReference|\.\w+)\)?\(\s*["']([0-9a-f]{40,44})["'][\s\S]{0,280}?["'](?:fetchSubscriptionAction|getSubscriptionAction|fetchUsageAction)["']/i
 const ACTION_RE_REV =
-  /["']fetchSubscriptionAction["'][\s\S]{0,200}?(?:createServerReference|\.\w+)\(\s*["']([0-9a-f]{40,44})["']/i
+  /["'](?:fetchSubscriptionAction|getSubscriptionAction|fetchUsageAction)["'][\s\S]{0,280}?(?:createServerReference|\.\w+)\)?\(\s*["']([0-9a-f]{40,44})["']/i
 const LOOSE_NEAR =
-  /fetchSubscriptionAction[\s\S]{0,140}?([0-9a-f]{40,44})|([0-9a-f]{40,44})[\s\S]{0,140}?fetchSubscriptionAction/i
+  /(?:fetchSubscriptionAction|getSubscriptionAction|fetchUsageAction)[\s\S]{0,200}?([0-9a-f]{40,44})|([0-9a-f]{40,44})[\s\S]{0,200}?(?:fetchSubscriptionAction|getSubscriptionAction|fetchUsageAction)/i
 
-function extractActionIdFromSource(source: string): string | null {
+const DISCOVERY_CHUNK_LIMIT = 240
+const DISCOVERY_CONCURRENCY = 8
+
+export function extractActionIdFromSource(source: string): string | null {
   return (
     source.match(ACTION_RE)?.[1] ||
     source.match(ACTION_RE_REV)?.[1] ||
@@ -161,13 +164,99 @@ function extractActionIdFromSource(source: string): string | null {
   )
 }
 
-/** Best-effort: scrape muse.ai bundles for the current Server Action id. */
-export async function discoverSubscriptionActionId(fetchFn: FetchFn, signal?: AbortSignal): Promise<string | null> {
+function extractBalancedJsonObject(text: string, braceStart: number, maxLen = 32_768): string | null {
+  if (text[braceStart] !== '{') return null
+  let depth = 0
+  let inStr = false
+  let escaped = false
+  const end = Math.min(text.length, braceStart + maxLen)
+  for (let i = braceStart; i < end; i++) {
+    const ch = text[i]!
+    if (inStr) {
+      if (escaped) escaped = false
+      else if (ch === '\\') escaped = true
+      else if (ch === '"') inStr = false
+      continue
+    }
+    if (ch === '"') inStr = true
+    else if (ch === '{') depth++
+    else if (ch === '}') {
+      depth--
+      if (depth === 0) return text.slice(braceStart, i + 1)
+    }
+  }
+  return null
+}
+
+function isUsableSubscription(sub: MuseSubscription | null): sub is MuseSubscription {
+  return Boolean(sub && (sub.tier.tierId || sub.tier.tierCode || sub.usage.state !== 'UNKNOWN'))
+}
+
+/** Extract an embedded subscription object directly from HTML / Next.js RSC flight chunks if present. */
+export function extractSubscriptionFromHtml(html: string): MuseSubscription | null {
+  const tryScan = (source: string): MuseSubscription | null => {
+    const re = /"subscription"\s*:\s*\{/g
+    let m: RegExpExecArray | null
+    let attempts = 0
+    while ((m = re.exec(source)) !== null && attempts++ < 8) {
+      const braceIdx = m.index + m[0].length - 1
+      const rawObj = extractBalancedJsonObject(source, braceIdx)
+      if (!rawObj) continue
+      try {
+        const sub = normalizeSubscription(JSON.parse(rawObj) as unknown)
+        if (isUsableSubscription(sub)) return sub
+      } catch {
+        /* keep scanning */
+      }
+    }
+    return null
+  }
+  const direct = tryScan(html)
+  if (direct) return direct
+  if (html.includes('\\"subscription\\"')) {
+    const unescaped = html.replace(/\\"/g, '"').replace(/\\\\/g, '\\')
+    return tryScan(unescaped)
+  }
+  return null
+}
+
+function collectChunkUrlsFromHtml(html: string, seen: Set<string>, queue: string[]): void {
+  const push = (rawPath: string) => {
+    const url = rawPath.startsWith('http') ? rawPath : new URL(rawPath, ORIGIN).href
+    if ((!url.includes('muse.ai') && !rawPath.startsWith('/')) || seen.has(url)) return
+    seen.add(url)
+    queue.push(url)
+  }
+  for (const m of html.matchAll(/<script[^>]+src=["']([^"']+)["']/gi)) {
+    const src = m[1]!
+    if (/\.js(\?|$)/.test(src)) push(src)
+  }
+  for (const m of html.matchAll(/\/_next\/static\/[^"'\\\s<>]+\.js/g)) {
+    push(m[0])
+  }
+}
+
+function collectNestedChunkUrls(js: string, seen: Set<string>, queue: string[]): void {
+  for (const m of js.matchAll(/["']((?:\/_next\/)?static\/(?:immutable\/)?chunks\/[A-Za-z0-9._/-]+\.js)["']/g)) {
+    const raw = m[1]!
+    const normalized = raw.startsWith('/') ? raw : `/_next/${raw}`
+    const url = `${ORIGIN}${normalized}`
+    if (!seen.has(url) && seen.size < DISCOVERY_CHUNK_LIMIT * 2) {
+      seen.add(url)
+      queue.push(url)
+    }
+  }
+}
+
+async function discoverSubscriptionContext(
+  fetchFn: FetchFn,
+  signal?: AbortSignal
+): Promise<{ actionId: string | null; inlineSubscription: MuseSubscription | null }> {
   const seenScripts = new Set<string>()
   const scriptQueue: string[] = []
-  // Probe authenticated app routes (/settings, /chat) BEFORE `/` so marketing landing
-  // chunks do not crowd out the authenticated settings/subscription chunks.
-  for (const pagePath of ['/settings', '/chat', '/']) {
+  let inlineSubscription: MuseSubscription | null = null
+  // Probe /settings, / and /chat so authenticated app chunks (including lazy Turbopack chunks) are queued.
+  for (const pagePath of ['/settings', '/', '/chat']) {
     signal?.throwIfAborted()
     try {
       const res = await fetchFn(ORIGIN + pagePath, {
@@ -176,44 +265,49 @@ export async function discoverSubscriptionActionId(fetchFn: FetchFn, signal?: Ab
       })
       if (!res.ok) continue
       const html = await res.text()
+      if (!inlineSubscription) inlineSubscription = extractSubscriptionFromHtml(html)
       const fromHtml = extractActionIdFromSource(html)
-      if (fromHtml) return fromHtml
-      for (const m of html.matchAll(/<script[^>]+src=["']([^"']+)["']/gi)) {
-        const src = m[1]!
-        if (!/\.js(\?|$)/.test(src)) continue
-        const url = src.startsWith('http') ? src : new URL(src, ORIGIN).href
-        if ((!url.includes('muse.ai') && !src.startsWith('/')) || seenScripts.has(url)) continue
-        seenScripts.add(url)
-        scriptQueue.push(url)
-      }
-      for (const m of html.matchAll(/\/_next\/static\/(?:immutable\/)?chunks\/[A-Za-z0-9_-]+\.js/g)) {
-        const url = `${ORIGIN}${m[0]}`
-        if (!seenScripts.has(url)) {
-          seenScripts.add(url)
-          scriptQueue.push(url)
-        }
-      }
+      if (fromHtml) return { actionId: fromHtml, inlineSubscription }
+      collectChunkUrlsFromHtml(html, seenScripts, scriptQueue)
     } catch {
       /* try next page */
     }
   }
-  for (const url of scriptQueue.slice(0, 96)) {
+  let scanned = 0
+  while (scriptQueue.length > 0 && scanned < DISCOVERY_CHUNK_LIMIT) {
     signal?.throwIfAborted()
-    try {
-      const r = await fetchFn(url, { headers: { Accept: '*/*' } })
-      if (!r.ok) continue
-      const js = await r.text()
-      const id = extractActionIdFromSource(js)
-      if (id) return id
-    } catch {
-      /* try next chunk */
+    const batch = scriptQueue.splice(0, Math.min(DISCOVERY_CONCURRENCY, DISCOVERY_CHUNK_LIMIT - scanned))
+    scanned += batch.length
+    const results = await Promise.all(
+      batch.map(async (url): Promise<{ actionId: string | null; js: string | null }> => {
+        try {
+          const r = await fetchFn(url, { headers: { Accept: '*/*' } })
+          if (!r.ok) return { actionId: null, js: null }
+          const js = await r.text()
+          return { actionId: extractActionIdFromSource(js), js }
+        } catch {
+          return { actionId: null, js: null }
+        }
+      })
+    )
+    for (const item of results) {
+      if (item.actionId) return { actionId: item.actionId, inlineSubscription }
+    }
+    for (const item of results) {
+      if (item.js) collectNestedChunkUrls(item.js, seenScripts, scriptQueue)
     }
   }
-  return null
+  return { actionId: null, inlineSubscription }
+}
+
+/** Best-effort: scrape muse.ai bundles for the current Server Action id. */
+export async function discoverSubscriptionActionId(fetchFn: FetchFn, signal?: AbortSignal): Promise<string | null> {
+  const { actionId } = await discoverSubscriptionContext(fetchFn, signal)
+  return actionId
 }
 
 async function tryRestSubscriptionEndpoints(fetchFn: FetchFn, fetchedAt: number): Promise<MuseQuotaSnapshot | null> {
-  for (const endpoint of ['/api/subscription', '/api/hatch/subscription', '/api/billing/subscription']) {
+  for (const endpoint of ['/api/subscription', '/api/hatch/subscription', '/api/billing/subscription', '/api/hatch/usage', '/api/usage']) {
     try {
       const res = await fetchFn(ORIGIN + endpoint, {
         method: 'GET',
@@ -223,7 +317,7 @@ async function tryRestSubscriptionEndpoints(fetchFn: FetchFn, fetchedAt: number)
       const json = (await res.json()) as unknown
       const root = obj(json)
       const sub = normalizeSubscription(root['subscription'] ?? root['result'] ?? root)
-      if (sub && (sub.tier.tierId || sub.tier.tierCode || sub.usage.state !== 'UNKNOWN')) {
+      if (isUsableSubscription(sub)) {
         return { fetchedAt, stale: false, success: true, subscription: sub }
       }
     } catch {
@@ -236,29 +330,41 @@ async function tryRestSubscriptionEndpoints(fetchFn: FetchFn, fetchedAt: number)
 async function postAction(
   fetchFn: FetchFn,
   actionId: string,
-  includeAgreement: boolean
-): Promise<{ status: number; text: string }> {
-  const body = JSON.stringify([{ includeAgreement }])
+  includeAgreement: boolean,
+  allowEmptyArgsRetry = false
+): Promise<{ status: number; text: string; allAuthRejected: boolean }> {
+  const bodies = allowEmptyArgsRetry ? [JSON.stringify([{ includeAgreement }]), '[]'] : [JSON.stringify([{ includeAgreement }])]
   let last = { status: 0, text: '' }
-  for (const actionPath of ['/settings', '/']) {
-    const res = await fetchFn(ORIGIN + actionPath, {
-      method: 'POST',
-      headers: {
-        Accept: 'text/x-component',
-        'Content-Type': 'text/plain;charset=UTF-8',
-        'Next-Action': actionId,
-        Origin: ORIGIN,
-        Referer: ORIGIN + actionPath
-      },
-      body
-    })
-    const text = await res.text()
-    last = { status: res.status, text }
-    if (res.status !== 409 && res.status !== 404) {
-      return last
+  let sawNonAuthStatus = false
+  let sawAuthStatus = false
+  // Try `/` first (official muse.ai Settings modal posts Server Actions to `/`), then `/settings`.
+  for (const body of bodies) {
+    for (const actionPath of ['/', '/settings']) {
+      const res = await fetchFn(ORIGIN + actionPath, {
+        method: 'POST',
+        headers: {
+          Accept: 'text/x-component',
+          'Content-Type': 'text/plain;charset=UTF-8',
+          'Next-Action': actionId,
+          Origin: ORIGIN,
+          Referer: ORIGIN + actionPath
+        },
+        body
+      })
+      const text = await res.text()
+      last = { status: res.status, text }
+      if (res.status === 401 || res.status === 403) {
+        sawAuthStatus = true
+        continue
+      }
+      sawNonAuthStatus = true
+      if (res.status >= 200 && res.status < 300 && looksLikeSubscription(text)) {
+        return { ...last, allAuthRejected: false }
+      }
     }
+    if (last.status >= 200 && last.status < 300 && looksLikeSubscription(last.text)) break
   }
-  return last
+  return { ...last, allAuthRejected: sawAuthStatus && !sawNonAuthStatus }
 }
 
 function looksLikeSubscription(text: string): boolean {
@@ -279,15 +385,17 @@ export async function fetchSubscription(
   const tryIds = new Set([cached ?? FALLBACK_ACTION_ID, FALLBACK_ACTION_ID])
   let lastStatus = 0
   let lastText = ''
+  let lastAllAuthRejected = false
   let parseError: MuseQuotaError | undefined
 
-  const tryAction = async (id: string): Promise<MuseQuotaSnapshot | undefined> => {
+  const tryAction = async (id: string, allowEmptyArgsRetry = false): Promise<MuseQuotaSnapshot | undefined> => {
     opts.signal?.throwIfAborted()
-    const { status, text } = await postAction(fetchFn, id, includeAgreement)
+    const { status, text, allAuthRejected } = await postAction(fetchFn, id, includeAgreement, allowEmptyArgsRetry)
     opts.signal?.throwIfAborted()
     lastStatus = status
     lastText = text
-    if (status === 401 || status === 403) {
+    lastAllAuthRejected = allAuthRejected
+    if (status === 401 && allAuthRejected) {
       throw new MuseQuotaError(`quota: not signed in (${status})`, 'signed_out')
     }
     if (status < 200 || status >= 300 || !looksLikeSubscription(text)) return
@@ -305,11 +413,13 @@ export async function fetchSubscription(
     const snapshot = await tryAction(id)
     if (snapshot) return snapshot
   }
+  let inlineSubscription: MuseSubscription | null = null
   if (opts.rediscover !== false) {
-    const discovered = await discoverSubscriptionActionId(fetchFn, opts.signal)
+    const discovered = await discoverSubscriptionContext(fetchFn, opts.signal)
     opts.signal?.throwIfAborted()
-    if (discovered && !tryIds.has(discovered)) {
-      const snapshot = await tryAction(discovered)
+    inlineSubscription = discovered.inlineSubscription
+    if (discovered.actionId && !tryIds.has(discovered.actionId)) {
+      const snapshot = await tryAction(discovered.actionId, true)
       if (snapshot) return snapshot
     }
   }
@@ -317,7 +427,13 @@ export async function fetchSubscription(
   const viaRest = await tryRestSubscriptionEndpoints(fetchFn, fetchedAt)
   opts.signal?.throwIfAborted()
   if (viaRest) return viaRest
+  if (inlineSubscription) {
+    return { fetchedAt, stale: false, success: true, subscription: inlineSubscription }
+  }
   if (parseError) throw parseError
+  if (lastAllAuthRejected && (lastStatus === 401 || lastStatus === 403)) {
+    throw new MuseQuotaError(`quota: not signed in (${lastStatus})`, 'signed_out')
+  }
   if (lastStatus === 404 || lastStatus === 400 || lastStatus === 409 || !looksLikeSubscription(lastText)) {
     throw new MuseQuotaError(
       `quota: fetchSubscriptionAction unavailable (HTTP ${lastStatus || 'n/a'})`,

@@ -161,6 +161,7 @@ describe('Muse session lifecycle', () => {
     session.activeSessionId = 'direct-session'
     const rpc = vi.spyOn(manager, 'rpc').mockResolvedValue({ session_id: 'room-session' })
     await expect(manager.startSession('account')).resolves.toEqual({ sessionId: 'room-session' })
+    expect(rpc).toHaveBeenCalledWith('account', 'session.start', { method: '/api/session/start', params: {} })
     expect(session.activeSessionId).toBe('direct-session')
     expect(session.botId).toBe('direct-bot')
     rpc.mockRestore()

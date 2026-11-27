@@ -17,8 +17,8 @@ import {
 } from './botNaming'
 import {
   ATTACHMENTS_LOST_TEXT, clearNoReplyFlag, createDeliveryAttempts, createSafeStorage, deliveryAfterError,
-  hasLostAttachments, sanitizePersisted, SEND_HARD_TIMEOUT_MS, SEND_STILL_PENDING_TEXT, SEND_TIMEOUT_TEXT,
-  SendTimeoutError, toPersistedMessages, withTimeout
+  formatDeliveryError, hasLostAttachments, sanitizePersisted, SEND_HARD_TIMEOUT_MS, SEND_STILL_PENDING_TEXT,
+  SEND_TIMEOUT_TEXT, SendTimeoutError, toPersistedMessages, withTimeout
 } from './delivery'
 import {
   antigravityHistory, cueHistory, dotHistory, dsBotHistory, grokHistory, harkHistory, hermesHistory, mergeHydratedMessages,
@@ -318,7 +318,7 @@ export const SIDEBAR_MAX = 400
 export const SIDEBAR_DEFAULT = 280
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'Something went wrong.'
+  return error instanceof Error ? formatDeliveryError(error, 'Something went wrong.') : 'Something went wrong.'
 }
 
 function omitKey<T>(record: Record<string, T>, key: string): Record<string, T> {

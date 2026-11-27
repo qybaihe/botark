@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { describe, expect, it, vi } from 'vitest'
-import { computeSessionPathFallback, extractRequiredMethodPath, MuseNativeGateway } from './gateway'
+import { computeSessionPathFallback, extractRequiredMethodPath, MuseNativeGateway, requiresParamsEnvelope } from './gateway'
 import { MUSE_METHODS } from './methods'
 import { extractStartedSessionId } from './sessions'
 import { CipherState } from './noise'
@@ -169,6 +169,70 @@ describe('Muse session.* method registry & path/body self-healing', () => {
     await gw.request('session.start')
     await gw.request('session.start')
     expect(calls.map((call) => call.body)).toEqual([{}, { method: '/api/session/start' }, {}, { method: '/api/session/start' }])
+  })
+
+  it('wraps and caches `{ method, params }` envelope when daemon returns `params` is required', async () => {
+    expect(requiresParamsEnvelope('{"ok":false,"error":{"code":"invalid_params","message":"`params` is required"}}')).toBe(true)
+    expect(requiresParamsEnvelope('unrelated error')).toBe(false)
+
+    const { gw, calls } = makeGatewayWithResponder(({ path, body }) => {
+      if (path === '/api/session/start' && body['method'] !== '/api/session/start') {
+        return {
+          status: 400,
+          body: { ok: false, error: { code: 'invalid_params', message: '`method` must be `/api/session/start`' } }
+        }
+      }
+      if (path === '/api/session/start' && (typeof body['params'] !== 'object' || body['params'] === null)) {
+        return {
+          status: 400,
+          body: { ok: false, error: { code: 'invalid_params', message: '`params` is required' } }
+        }
+      }
+      return { status: 200, body: { ok: true, result: { session_id: 'sess_enveloped' } } }
+    })
+
+    const first = await gw.request('session.start', {})
+    expect(extractStartedSessionId(first)).toBe('sess_enveloped')
+    expect(calls).toEqual([
+      { verb: 'POST', path: '/api/session/start', body: {} },
+      { verb: 'POST', path: '/api/session/start', body: { method: '/api/session/start' } },
+      { verb: 'POST', path: '/api/session/start', body: { method: '/api/session/start', params: {} } }
+    ])
+
+    // Subsequent call immediately sends `{ method, params }` in 1 round-trip.
+    const second = await gw.request('session.start', {})
+    expect(extractStartedSessionId(second)).toBe('sess_enveloped')
+    expect(calls).toHaveLength(4)
+    expect(calls[3]).toEqual({
+      verb: 'POST',
+      path: '/api/session/start',
+      body: { method: '/api/session/start', params: {} }
+    })
+  })
+
+  it('moves flat request fields into `params` when a mutation requires the `{ method, params }` envelope', async () => {
+    const { gw, calls } = makeGatewayWithResponder(({ body }) => {
+      if (body['method'] !== '/api/session/rename') {
+        return {
+          status: 400,
+          body: { ok: false, error: { code: 'invalid_params', message: '`method` must be `/api/session/rename`' } }
+        }
+      }
+      if (typeof body['params'] !== 'object' || body['params'] === null) {
+        return {
+          status: 400,
+          body: { ok: false, error: { code: 'invalid_params', message: '`params` is required' } }
+        }
+      }
+      return { status: 200, body: { ok: true } }
+    })
+
+    await gw.request('session.rename', { session_id: 's1', title: 'Renamed' })
+    expect(calls.at(-1)).toEqual({
+      verb: 'POST',
+      path: '/api/session/rename',
+      body: { method: '/api/session/rename', params: { session_id: 's1', title: 'Renamed' } }
+    })
   })
 })
 

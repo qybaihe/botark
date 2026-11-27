@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { ExternalLink } from 'lucide-react'
 import type { MuseQuotaSnapshot } from '@shared/ipc'
 import { EmptyLine, Section } from '@/components/info/Section'
 import { RefreshButton } from '@/components/muse/RefreshButton'
@@ -52,17 +53,36 @@ export function QuotaSection({ accountId }: { accountId: string }) {
     const muse = getBridge()?.muse
     if (!muse?.onEvent) return
     return muse.onEvent((event) => {
-      if (event.type === 'quota' && event.accountId === accountId) setSnap(event.snapshot)
+      if (event.type === 'quota' && event.accountId === accountId) {
+        setSnap(event.snapshot)
+        setError(event.snapshot.error ? cleanSidebarError(event.snapshot.error) : undefined)
+      }
     })
   }, [accountId])
 
   const sub = snap?.subscription
+  const online = isOnlineAccountStatus(status)
+  const openMuseWeb = () => {
+    void getBridge()?.muse?.openExternal?.('https://muse.ai/')
+  }
 
   return (
     <Section title="额度管理" action={<RefreshButton loading={loading} onClick={() => void refresh()} />}>
       {error && <p className="pb-1 text-[12px] text-status-error">{error}</p>}
       {!sub ? (
-        <EmptyLine>{loading ? t('Loading usage…') : t('Usage unavailable')}</EmptyLine>
+        <div className="flex items-center justify-between gap-2">
+          <EmptyLine>{loading ? t('Loading usage…') : online ? t('Usage unavailable') : '请先登录 Muse 账号'}</EmptyLine>
+          {!loading && online && (
+            <button
+              type="button"
+              onClick={openMuseWeb}
+              className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md px-1.5 py-0.5 text-[11px] text-ink-secondary hover:bg-hover hover:text-ink"
+            >
+              <span>前往 Muse 查看</span>
+              <ExternalLink className="size-3 shrink-0" aria-hidden />
+            </button>
+          )}
+        </div>
       ) : (
         <div className="flex flex-col gap-2 py-0.5">
           <div className="flex items-baseline justify-between gap-2">
