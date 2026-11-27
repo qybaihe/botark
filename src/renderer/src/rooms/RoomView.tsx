@@ -17,6 +17,8 @@ import { TranscriptSearchBar, TranscriptSearchButton } from '@/components/chat/T
 import { revealTranscriptRow } from '@/lib/transcriptFocus'
 import { focusRoomMessage, ROOM_FOCUS_EVENT, takeRoomMessageFocus } from './roomFocus'
 import { MarkdownText } from '@/components/chat/MarkdownText'
+import { MediaPreview } from '@/components/chat/MediaPreview'
+import { NativeDocumentDialog, type NativeDocumentTarget } from '@/components/chat/NativeDocumentDialog'
 import { PaneHeader } from '@/components/layout/PaneHeader'
 import {
   ArkComposeNewSvg,
@@ -477,6 +479,7 @@ const RoomMessageRow = memo(function RoomMessageRow({
   const authorBotId = message.authorBotId ?? member?.botId
   const bot = useBotStore((s) => authorBotId ? s.bots.find((b) => b.id === authorBotId) : undefined)
   const [copied, setCopied] = useState(false)
+  const [document, setDocument] = useState<NativeDocumentTarget | null>(null)
 
   if (message.notice) {
     return <p className="mx-auto text-xs text-ink-muted">{message.text}</p>
@@ -507,6 +510,26 @@ const RoomMessageRow = memo(function RoomMessageRow({
   }
 
   const cleanText = finalDeliverable ? stripFinalPrefix(message.text) : message.text
+  const source = message.mediaSource
+  const onFileLinkClick = source ? (path: string, title: string) => setDocument({
+    accountId: source.accountId,
+    platformId: source.platform,
+    agentId: source.agentId,
+    sessionId: source.sessionId,
+    path,
+    title
+  }) : undefined
+  const preview = <NativeDocumentDialog target={document} onClose={() => setDocument(null)} />
+  const media = source && message.media?.length ? (
+    <div className="mt-2">
+      <MediaPreview
+        parts={message.media}
+        accountId={source.accountId}
+        scope={source}
+        onOpenDoc={(target) => setDocument({ ...target, platformId: source.platform })}
+      />
+    </div>
+  ) : null
   const handoffs = message.handoffBotIds?.flatMap((id) => {
     const target = members.find((m) => m.botId === id)
     return target ? [target.name] : []
@@ -552,7 +575,9 @@ const RoomMessageRow = memo(function RoomMessageRow({
             </div>
           </div>
           <div className="px-5 py-4 text-[14px] leading-[23px] text-ink">
-            <MarkdownText text={cleanText} />
+            {cleanText && <MarkdownText text={cleanText} onFileLinkClick={onFileLinkClick} />}
+            {media}
+            {preview}
           </div>
         </div>
       </article>
@@ -585,9 +610,11 @@ const RoomMessageRow = memo(function RoomMessageRow({
 
         {cleanText && (
           <div className="rounded-2xl bg-bubble px-4 py-3 text-[14px] leading-[22px] text-ink">
-            <MarkdownText text={cleanText} />
+            <MarkdownText text={cleanText} onFileLinkClick={onFileLinkClick} />
           </div>
         )}
+        {media}
+        {preview}
 
         <div className="mt-1 flex items-center gap-2 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
           {cleanText && (
@@ -648,6 +675,7 @@ export function RoomView({ id }: { id: string }) {
   const t = useT()
   const room = useRooms((s) => s.rooms.find((r) => r.id === id))
   const speaker = useRooms((s) => s.speakers[id])
+  const liveReply = useRooms((s) => s.liveReplies[id])
   const progress = useRooms((s) => s.turnProgress[id])
   const error = useRooms((s) => s.errors[id])
   const audience = useRooms((s) => s.externalAudiences[id])
@@ -699,7 +727,7 @@ export function RoomView({ id }: { id: string }) {
       if (transcript && followLatest.current) transcript.scrollTop = transcript.scrollHeight
     })
     return () => cancelAnimationFrame(frame)
-  }, [id, room?.messages.length, speaker])
+  }, [id, room?.messages.length, speaker, liveReply])
 
   useEffect(() => {
     const onAppend = (event: Event) => {
@@ -945,7 +973,7 @@ export function RoomView({ id }: { id: string }) {
           <div className="flex flex-col gap-5">
             <RoomTranscript
               members={room.members}
-              messages={room.messages}
+              messages={liveReply ? [...room.messages, liveReply] : room.messages}
               finalId={room.finalId}
               onMentionReply={insertMention}
               onExport={exportMessage}

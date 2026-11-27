@@ -94,8 +94,10 @@ function findTranscriptReply(payload: unknown, afterMessageId?: string): GrokRep
     (row.id === afterMessageId || row.clientNonce === afterMessageId)) : -1
   if (afterMessageId && anchor === -1) return undefined
   const requestId = rows[anchor]?.requestId
-  return rows.slice(anchor + 1).findLast((row) => (row.role === 'assistant' || row.role === 'bot') && !row.isStreaming &&
-    (!requestId || !row.requestId || row.requestId === requestId) &&
+  const following = rows.slice(anchor + 1)
+  const nextPrompt = anchor >= 0 ? following.findIndex((row) => row.role === 'user') : -1
+  return following.findLast((row, index) => (row.role === 'assistant' || row.role === 'bot') && !row.isStreaming &&
+    (requestId && row.requestId ? row.requestId === requestId : nextPrompt < 0 || index < nextPrompt) &&
     Boolean(row.text.trim() || row.widgets?.length || row.richWidgets?.length || row.media?.length))
 }
 
@@ -613,7 +615,7 @@ export class GrokBotAdapter implements PlatformAdapter {
           message: {
             ...bubble,
             id: replyId ? (replyId.startsWith('grok_') ? replyId : `grok_${replyId}`) : createId('msg'),
-            conversationId: message.conversationId, accountId: message.accountId,
+            conversationId: message.conversationId, accountId: message.accountId, agentId,
             sessionId: sessionId || undefined, createdAt: Date.now()
           }
         })

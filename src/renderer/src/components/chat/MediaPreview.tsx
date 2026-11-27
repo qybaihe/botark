@@ -8,6 +8,8 @@ import { useBotStore } from '@/store/botStore'
 import type { ChatMediaPart, ChatMessage } from '@/types'
 import type { NativeDocumentTarget } from './NativeDocumentDialog'
 
+type MediaScope = Pick<NativeDocumentTarget, 'agentId' | 'sessionId'>
+
 function isHttp(path: string): boolean {
   return /^https?:\/\//i.test(path)
 }
@@ -213,7 +215,7 @@ async function downloadDotMedia(accountId: string, part: ChatMediaPart) {
   return { dataBase64: d.dataBase64, mimeType: d.mimeType, filename: d.filename || d.name }
 }
 
-async function downloadGrokMedia(accountId: string, part: ChatMediaPart) {
+async function downloadGrokMedia(accountId: string, part: ChatMediaPart, scope?: MediaScope) {
   const grok = getBridge()?.grok
   if (!grok?.rpc) throw new Error('Grok download unavailable')
   const storeState = useBotStore.getState()
@@ -224,7 +226,8 @@ async function downloadGrokMedia(accountId: string, part: ChatMediaPart) {
   const dl = await grok.rpc({
     accountId,
     op: 'downloadAttachment',
-    agentId: ownerBot?.selectedAgentId,
+    agentId: scope?.agentId ?? ownerBot?.selectedAgentId,
+    sessionId: scope?.sessionId,
     path: part.path,
     name: part.name
   })
@@ -259,7 +262,8 @@ async function downloadCueMedia(accountId: string, part: ChatMediaPart) {
 
 async function fetchPlatformMediaBytes(
   accountId: string,
-  part: ChatMediaPart
+  part: ChatMediaPart,
+  scope?: MediaScope
 ): Promise<{ dataBase64: string; mimeType: string; filename?: string } | null> {
   const rawPath = (part.path || '').trim()
   if (rawPath.startsWith('data:')) {
@@ -283,7 +287,7 @@ async function fetchPlatformMediaBytes(
     return downloadDotMedia(accountId, part)
   }
   if (isGrokMedia(accountId, rawPath)) {
-    return downloadGrokMedia(accountId, part)
+    return downloadGrokMedia(accountId, part, scope)
   }
   if (isCueMedia(accountId, rawPath)) {
     return downloadCueMedia(accountId, part)
@@ -422,10 +426,12 @@ function ImageLightbox({
 
 export function WorkspaceImage({
   part,
-  accountId
+  accountId,
+  scope
 }: {
   part: ChatMediaPart
   accountId?: string
+  scope?: MediaScope
 }) {
   const initialDirectSrc =
     /^data:image\//i.test(part.path) || (isHttp(part.path) && !needsAuthProxyHttpUrl(part.path))
@@ -452,7 +458,7 @@ export function WorkspaceImage({
     let cancelled = false
     void (async () => {
       try {
-        const fetched = await fetchPlatformMediaBytes(accountId, part)
+        const fetched = await fetchPlatformMediaBytes(accountId, part, scope)
         if (cancelled) return
         if (!fetched?.dataBase64) {
           setFailed(true)
@@ -477,7 +483,7 @@ export function WorkspaceImage({
     return () => {
       cancelled = true
     }
-  }, [accountId, part, src, failed, retryNonce])
+  }, [accountId, part, scope, src, failed, retryNonce])
 
   const filename = part.name || (!isHttp(part.path) ? part.path.split('/').pop() : undefined) || 'image.png'
 
@@ -567,18 +573,20 @@ export function WorkspaceImage({
 function WorkspaceAV({
   part,
   accountId,
+  scope,
   kind
 }: {
   part: ChatMediaPart
   accountId?: string
+  scope?: MediaScope
   kind: 'audio' | 'video'
 }) {
   const { path, name, mimeType, imageId, kind: mediaKind } = part
   const directSrc = /^data:(?:audio|video)\//i.test(path) || (isHttp(path) && !needsAuthProxyHttpUrl(path)) ? path : null
   const [retryNonce, setRetryNonce] = useState(0)
   const source = useMemo(() => ({
-    accountId, part: { path, name, mimeType, imageId, kind: mediaKind }, kind, retryNonce
-  }), [accountId, path, name, mimeType, imageId, mediaKind, kind, retryNonce])
+    accountId, part: { path, name, mimeType, imageId, kind: mediaKind }, kind, scope, retryNonce
+  }), [accountId, path, name, mimeType, imageId, mediaKind, kind, scope, retryNonce])
   const [proxySrc, setProxySrc] = useState<{ source: typeof source; url: string }>()
   const [failedSource, setFailedSource] = useState<typeof source>()
   const [proxySource, setProxySource] = useState<typeof source>()
@@ -595,7 +603,7 @@ function WorkspaceAV({
     let objectUrl: string | null = null
     void (async () => {
       try {
-        const fetched = await fetchPlatformMediaBytes(owner, media)
+        const fetched = await fetchPlatformMediaBytes(owner, media, source.scope)
         if (cancelled) return
         if (!fetched?.dataBase64) {
           setFailedSource(source)
@@ -693,10 +701,12 @@ function WorkspaceAV({
 export const MediaPreview = memo(function MediaPreview({
   parts,
   accountId,
+  scope,
   onOpenDoc
 }: {
   parts: ChatMediaPart[]
   accountId?: string
+  scope?: MediaScope
   onOpenDoc?: (target: NativeDocumentTarget) => void
 }) {
   const [downloadingKey, setDownloadingKey] = useState<string | null>(null)
@@ -711,7 +721,7 @@ export const MediaPreview = memo(function MediaPreview({
     try {
       const rawPath = (part.path || '').trim()
       const isHttpUrl = /^https?:\/\//i.test(rawPath)
-      const fetched = await fetchPlatformMediaBytes(accountId, part)
+      const fetched = await fetchPlatformMediaBytes(accountId, part, scope)
 
       const dataBase64 = fetched?.dataBase64 || ''
       const mimeType = fetched?.mimeType || part.mimeType || 'application/octet-stream'
@@ -758,31 +768,33 @@ export const MediaPreview = memo(function MediaPreview({
           ? part.mimeType || '可预览 / 下载文件'
           : part.path
         const key = part.path || part.name || 'part'
+        const openPart = () => {
+          if (!accountId || !onOpenDoc) return
+          onOpenDoc({
+            accountId,
+            title: part.name || (!isHttpUrl ? part.path.split('/').pop() : undefined) || 'Document',
+            path: part.path,
+            mimeType: part.mimeType,
+            agentId: scope?.agentId,
+            sessionId: scope?.sessionId
+          })
+        }
         return (
           <li
             key={key}
             className="overflow-hidden rounded-xl border border-line bg-surface shadow-soft"
           >
             {looksLikeImage(part) ? (
-              <WorkspaceImage part={part} accountId={accountId} />
+              <WorkspaceImage part={part} accountId={accountId} scope={scope} />
             ) : looksLikeAudio(part) ? (
-              <WorkspaceAV part={part} accountId={accountId} kind="audio" />
+              <WorkspaceAV part={part} accountId={accountId} scope={scope} kind="audio" />
             ) : looksLikeVideo(part) ? (
-              <WorkspaceAV part={part} accountId={accountId} kind="video" />
+              <WorkspaceAV part={part} accountId={accountId} scope={scope} kind="video" />
             ) : (
               <div className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-[12px]">
                 <button
                   type="button"
-                  onClick={() => {
-                    if (accountId && onOpenDoc) {
-                      onOpenDoc({
-                        accountId,
-                        title: part.name || (!isHttpUrl ? part.path.split('/').pop() : undefined) || 'Document',
-                        path: part.path,
-                        mimeType: part.mimeType
-                      })
-                    }
-                  }}
+                  onClick={openPart}
                   className="flex min-w-0 flex-1 items-center gap-2 text-left hover:opacity-85"
                 >
                   <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-accent-50 text-accent-600">
@@ -800,16 +812,7 @@ export const MediaPreview = memo(function MediaPreview({
                 <div className="flex shrink-0 items-center gap-1">
                   <button
                     type="button"
-                    onClick={() => {
-                      if (accountId && onOpenDoc) {
-                        onOpenDoc({
-                          accountId,
-                          title: part.name || (!isHttpUrl ? part.path.split('/').pop() : undefined) || 'Document',
-                          path: part.path,
-                          mimeType: part.mimeType
-                        })
-                      }
-                    }}
+                    onClick={openPart}
                     className="inline-flex items-center gap-1 rounded-full bg-hover px-2 py-0.5 text-[11px] font-medium text-accent-600 hover:bg-active"
                   >
                     <Maximize2 className="size-3" /> 预览

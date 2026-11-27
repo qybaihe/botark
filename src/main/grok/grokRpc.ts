@@ -78,6 +78,29 @@ function fail(error: unknown): GrokRpcResponse {
 }
 
 const GROK_REPLY_SETTLE_MS = 12_000
+const GROK_ROOM_PROGRESS_GRACE_MS = 60_000
+const GROK_REPLY_HISTORY_INTERVAL_MS = 4_000
+const GROK_REPLY_HISTORY_TIMEOUT_MS = 6_000
+const GROK_REPLY_HISTORY_MAX_PAGES = 8
+
+function followsGrokEntry(
+  entry: ParsedGrokTranscriptEntry,
+  previous: ParsedGrokTranscriptEntry,
+  order: number | undefined,
+  previousOrder: number | undefined
+): boolean {
+  const seq = grokSeq(entry.seq)
+  const previousSeq = grokSeq(previous.seq)
+  if (seq > 0n && previousSeq > 0n) return seq > previousSeq
+  const updated = grokSeq(entry.updatedSeq)
+  const previousUpdated = grokSeq(previous.updatedSeq)
+  if (updated > 0n && previousUpdated > 0n) return updated > previousUpdated
+  if (previous.hasTimestamp && entry.hasTimestamp && entry.createdAtMs !== previous.createdAtMs) {
+    return entry.createdAtMs > previous.createdAtMs
+  }
+  return Boolean(previous.requestId && entry.requestId === previous.requestId) ||
+    (previousOrder !== undefined && order !== undefined && order > previousOrder)
+}
 
 interface GrokReplyBubble {
   messageId: string
@@ -86,6 +109,13 @@ interface GrokReplyBubble {
   richWidgets?: MuseRichWidgetView[]
   tools?: MuseToolCallView[]
   media?: MuseMediaPartView[]
+}
+
+function isRoomProgressReply(bubble: GrokReplyBubble): boolean {
+  const text = bubble.text.trim()
+  if (!text || text.length > 160 || bubble.media?.length || bubble.widgets?.length || bubble.richWidgets?.length) return false
+  if (/\[(?:FINAL|HANDOFF|TOOL)\]|(?:https?|grok(?:att|store|doc)):\/\/|\r?\n|已经|已完成|已生成|已整理|查到了|如下|见附件|\b(?:here (?:is|are)|attached|finished)\b/i.test(text)) return false
+  return /(?:我(?:先|来|会|将|这就|正在)|让我)[^。！？\n]{0,24}(?:查|搜|检索|整理|生成|制作|准备|撰写|导出|汇总)|稍(?:等|候)|\b(?:let me|i(?:['’]ll| will))\s+(?:check|look|search|prepare|gather|compile|create|generate|draft)\b/i.test(text)
 }
 
 export async function watchUntilReply(
@@ -112,6 +142,7 @@ export async function watchUntilReply(
   const credentialSignal = activeGrokCredentialSignal(args.accountId)
   const signal = AbortSignal.any([ac.signal, credentialSignal, ...(args.signal ? [args.signal] : [])])
   const { accountId, agentId, sessionId } = args
+  const isRoomTurn = args.conversationId?.startsWith('room-turn-') === true
   const watchHandle = getGrokAccountWatch(accountId)
   const streamsInBackground = watchHandle?.watchesSession(agentId, sessionId) ?? false
   const revisions = new GrokEntryRevisions()
@@ -124,14 +155,15 @@ export async function watchUntilReply(
   let generation = 0
   let anchor: ParsedGrokTranscriptEntry | undefined
   let anchorOrder: number | undefined
+  let nextPrompt: { entry: ParsedGrokTranscriptEntry; order?: number } | undefined
   let received = 0
   const entryOrder = new Map<string, number>()
   let echoEntryId: string | undefined
-  let anchorLookup: Promise<ParsedGrokTranscriptEntry | undefined> | undefined
   let nextAnchorLookupAt = 0
   let turnFailed: { code: string; summary: string } | undefined
   let isAgentRunning = false
   let settleTimer: ReturnType<typeof setTimeout> | undefined
+  let roomProgressUntil: number | undefined
 
   const assertCurrent = () => {
     signal.throwIfAborted()
@@ -143,44 +175,63 @@ export async function watchUntilReply(
   )
   const armSettle = (ms: number) => {
     clearTimeout(settleTimer)
+    if (isRoomTurn && bubbles.size && [...bubbles.values()].every(({ bubble }) => isRoomProgressReply(bubble))) {
+      roomProgressUntil ??= Date.now() + GROK_ROOM_PROGRESS_GRACE_MS
+      ms = Math.max(0, roomProgressUntil - Date.now())
+    } else {
+      roomProgressUntil = undefined
+    }
     settleTimer = setTimeout(() => ac.abort(), ms)
   }
 
-  const lookupAnchor = async (): Promise<ParsedGrokTranscriptEntry | undefined> => {
+  const lookupEchoEntryId = async (readSignal: AbortSignal): Promise<string | undefined> => {
     if (!sentId) return undefined
     try {
-      const status = asObj(await client.getSendStatus({ agentId, sessionId, messageId: sentId }, signal))
-      assertCurrent()
-      echoEntryId = str(status?.['echoEntryId'] ?? status?.['echo_entry_id']) || undefined
-    } catch { assertCurrent() }
-    const page = await readGrokTranscriptGap(client, { agentId, sessionId }, {
-      floor: afterSeq, stopAt: (entry) => isAnchor(entry) || Boolean(echoEntryId && entry.entryId === echoEntryId), signal
-    })
-    assertCurrent()
-    let candidate = page.entries.find(isAnchor)
-    if (!candidate && echoEntryId) {
-      const stub = page.entries.find((entry) => entry.entryId === echoEntryId && entry.bodyOmitted)
-      if (stub) {
-        const hydrated = await hydrateGrokEntry(client, agentId, sessionId, stub, signal)
-        if (isAnchor(hydrated)) candidate = hydrated
-      }
+      const status = asObj(await client.getSendStatus({ agentId, sessionId, messageId: sentId }, readSignal))
+      readSignal.throwIfAborted()
+      return str(status?.['echoEntryId'] ?? status?.['echo_entry_id']) || undefined
+    } catch {
+      readSignal.throwIfAborted()
+      return undefined
     }
-    return candidate
   }
 
-  const acceptEntries = async (entries: ParsedGrokTranscriptEntry[]) => {
+  const readTurnHistory = async (readSignal: AbortSignal, lookupEchoFirst = false) => {
+    let echoId = echoEntryId
+    if (lookupEchoFirst && !echoId) echoId = await lookupEchoEntryId(readSignal)
+    const matches = (entry: ParsedGrokTranscriptEntry) => isAnchor(entry) ||
+      Boolean(echoId && entry.entryId === echoId)
+    const page = await readGrokTranscriptGap(client, { agentId, sessionId }, {
+      floor: 0n, stopAt: matches, signal: readSignal, maxPages: GROK_REPLY_HISTORY_MAX_PAGES
+    })
+    let index = page.entries.findIndex(matches)
+    if (index < 0 && !echoId && !lookupEchoFirst) {
+      echoId = await lookupEchoEntryId(readSignal)
+      index = page.entries.findIndex(matches)
+    }
+    const entry = page.entries[index]
+    const prompt = entry?.bodyOmitted ? await hydrateGrokEntry(client, agentId, sessionId, entry, readSignal) : entry
+    const verified = prompt?.role === 'user' && matches(prompt)
+    return { echoId, generation: page.generation, entries: verified ? [prompt, ...page.entries.slice(index + 1)] : [] }
+  }
+
+  const acceptEntries = async (entries: ParsedGrokTranscriptEntry[], advanceCursor = true, readSignal = signal) => {
     const hydrated: Array<{ entry: ParsedGrokTranscriptEntry; order: number }> = []
     for (const entry of entries) {
       assertCurrent()
       const seq = grokSeq(entry.updatedSeq)
-      if (seq > cursor) cursor = seq
-      const parsed = await hydrateGrokEntry(client, agentId, sessionId, entry, signal)
+      if (advanceCursor && seq > cursor) cursor = seq
+      const parsed = await hydrateGrokEntry(client, agentId, sessionId, entry, readSignal)
       assertCurrent()
       const order = ++received
       hydrated.push({ entry: parsed, order })
-      if (isAnchor(parsed) && (anchorOrder === undefined || !anchor)) {
-        anchor = parsed
-        anchorOrder = order
+      if (isAnchor(parsed)) {
+        if (!anchor || anchorOrder === undefined) {
+          anchor = parsed
+          anchorOrder = order
+        } else if (!advanceCursor && parsed.entryId === anchor.entryId) {
+          anchorOrder = order
+        }
       }
     }
     for (const { entry, order } of hydrated) {
@@ -195,41 +246,45 @@ export async function watchUntilReply(
           pending.delete(oldest)
           entryOrder.delete(oldest)
         }
+      } else if (!advanceCursor && pending.has(entry.entryId)) {
+        entryOrder.set(entry.entryId, order)
       }
     }
     if (sentId && !anchor && pending.size && Date.now() >= nextAnchorLookupAt) {
-      anchorLookup ??= lookupAnchor().catch(() => undefined).finally(() => {
-        nextAnchorLookupAt = Date.now() + 1000
-        anchorLookup = undefined
-      })
-      anchor = await anchorLookup
+      const history = await readTurnHistory(readSignal, true).catch(() => undefined)
+      nextAnchorLookupAt = Date.now() + 1000
       assertCurrent()
+      echoEntryId ??= history?.echoId
+      anchor = history?.entries[0]
+      const following = history?.entries.slice(1).find((entry) => entry.role === 'user')
+      if (following) nextPrompt = { entry: following }
     }
-    if (sentId && !anchor) return
+    if (sentId && !anchor) return false
+    if (anchor) {
+      for (const candidate of hydrated) {
+        const { entry, order } = candidate
+        if (entry.role !== 'user' || isAnchor(entry) || !followsGrokEntry(entry, anchor, order, anchorOrder)) continue
+        if (!nextPrompt || nextPrompt.entry.entryId === entry.entryId ||
+            followsGrokEntry(nextPrompt.entry, entry, nextPrompt.order, order)) nextPrompt = candidate
+      }
+    }
 
+    let receivedReply = false
     for (const entry of [...pending.values()].sort(compareGrokEntries)) {
       pending.delete(entry.entryId)
       const order = entryOrder.get(entry.entryId)
       entryOrder.delete(entry.entryId)
       if (anchor?.requestId && entry.requestId && anchor.requestId !== entry.requestId) continue
-      const seq = grokSeq(entry.seq)
-      const anchorSeq = grokSeq(anchor?.seq)
-      const updated = grokSeq(entry.updatedSeq)
-      const anchorUpdated = grokSeq(anchor?.updatedSeq)
-      if (anchor) {
-        const followsAnchor = seq > 0n && anchorSeq > 0n ? seq > anchorSeq
-          : updated > 0n && anchorUpdated > 0n ? updated > anchorUpdated
-          : anchor.hasTimestamp && entry.hasTimestamp && entry.createdAtMs !== anchor.createdAtMs
-            ? entry.createdAtMs > anchor.createdAtMs
-            : Boolean(anchor.requestId && entry.requestId === anchor.requestId) ||
-              (anchorOrder !== undefined && order !== undefined && order > anchorOrder)
-        if (!followsAnchor) continue
-      }
+      if (anchor && !followsGrokEntry(entry, anchor, order, anchorOrder)) continue
+      const matchesRequest = Boolean(anchor?.requestId && entry.requestId === anchor.requestId)
+      if (nextPrompt && !matchesRequest && !followsGrokEntry(nextPrompt.entry, entry, nextPrompt.order, order)) continue
       if (entry.role === 'tool' && entry.toolCall) {
         collectedTools.set(entry.toolCall.id, entry.toolCall)
         continue
       }
-      const media = await watchHandle?.resolveMediaUrls(client, agentId, sessionId, entry.media, signal) ?? entry.media
+      // Room messages retain file references so the original account can resolve them on demand.
+      const media = isRoomTurn ? entry.media
+        : await watchHandle?.resolveMediaUrls(client, agentId, sessionId, entry.media, readSignal) ?? entry.media
       assertCurrent()
       if (!entry.text && !entry.widgets?.length && !entry.richWidgets?.length && !media?.length) continue
       const messageId = `grok_${entry.entryId}`
@@ -238,13 +293,15 @@ export async function watchUntilReply(
         tools: collectedTools.size ? [...collectedTools.values()] : undefined
       }
       bubbles.set(messageId, { entry, bubble })
-      if (!streamsInBackground) broadcastGrokEvent({
+      receivedReply = true
+      if (isRoomTurn || !streamsInBackground) broadcastGrokEvent({
         type: 'stream', accountId, conversationId: args.conversationId, agentId,
         sessionId: sessionId || undefined, ...bubble, done: !entry.isStreaming
       })
       if (entry.isStreaming) clearTimeout(settleTimer)
       else armSettle(isAgentRunning ? GROK_REPLY_SETTLE_MS : 2_200)
     }
+    return receivedReply
   }
 
   const resetGeneration = (next: number) => {
@@ -257,76 +314,118 @@ export async function watchUntilReply(
     collectedTools.clear()
     anchor = undefined
     anchorOrder = undefined
+    nextPrompt = undefined
     nextAnchorLookupAt = 0
+    roomProgressUntil = undefined
     clearTimeout(settleTimer)
+  }
+
+  let applied = Promise.resolve()
+  const applyInOrder = (update: () => Promise<void>) => {
+    const next = applied.then(update)
+    applied = next.catch(() => undefined)
+    return next
+  }
+
+  let historyTimer: ReturnType<typeof setTimeout> | undefined
+  let historyTask: Promise<void> | undefined
+  const scheduleHistoryRead = () => {
+    if (!sentId || signal.aborted || turnFailed || historyTask) return
+    clearTimeout(historyTimer)
+    historyTimer = setTimeout(() => {
+      const readSignal = AbortSignal.any([signal, AbortSignal.timeout(GROK_REPLY_HISTORY_TIMEOUT_MS)])
+      // The request runs alongside the live stream. Only applying results needs to be ordered.
+      historyTask = readTurnHistory(readSignal).then((history) => applyInOrder(async () => {
+        assertCurrent()
+        readSignal.throwIfAborted()
+        if (turnFailed || (history.generation !== undefined && generation !== 0 && history.generation !== generation)) return
+        echoEntryId ??= history.echoId
+        if (history.entries.length) await acceptEntries(history.entries, false, readSignal)
+      })).catch(() => undefined).finally(() => {
+        historyTask = undefined
+        scheduleHistoryRead()
+      })
+    }, GROK_REPLY_HISTORY_INTERVAL_MS)
   }
 
   try {
     let failures = 0
     let gapFloor: bigint | undefined
     let lastBackfilled: bigint | undefined
+    scheduleHistoryRead()
     while (!signal.aborted && !turnFailed) {
       assertCurrent()
       let reconnect = false
       try {
         if (gapFloor !== undefined) {
           const result = await readGrokTranscriptGap(client, { agentId, sessionId }, { floor: gapFloor, signal })
-          if (result.generation !== undefined && result.generation > generation) resetGeneration(result.generation)
-          await acceptEntries(result.entries)
-          const watermark = grokSeq(result.watermark)
-          if (watermark > cursor) cursor = watermark
+          await applyInOrder(async () => {
+            if (result.generation !== undefined && result.generation > generation) resetGeneration(result.generation)
+            await acceptEntries(result.entries)
+            const watermark = grokSeq(result.watermark)
+            if (watermark > cursor) cursor = watermark
+          })
           gapFloor = undefined
         }
         for await (const frame of client.watchTranscripts({
           cursors: [{ agent_id: agentId, generation, after_updated_seq: cursor.toString(), session_id: sessionId }],
           includeUnlistedAgents: false
         }, signal)) {
-          assertCurrent()
-          const tf = asObj(frame['turn_failed'] ?? frame['turnFailed'])
-          if (tf && matchesScope(tf)) {
-            const related = str(tf['messageId'] ?? tf['message_id'] ?? tf['clientNonce'] ?? tf['client_nonce'])
-            if (related && sentId && related !== sentId && related !== echoEntryId && related !== anchor?.entryId) continue
-            turnFailed = {
-              code: str(tf['code'] ?? 'TURN_FAILED'),
-              summary: str(tf['summary'] ?? 'Grok Bot 执行该轮对话失败')
+          let endStream = false
+          await applyInOrder(async () => {
+            assertCurrent()
+            const tf = asObj(frame['turn_failed'] ?? frame['turnFailed'])
+            if (tf && matchesScope(tf)) {
+              const related = str(tf['messageId'] ?? tf['message_id'] ?? tf['clientNonce'] ?? tf['client_nonce'])
+              if (related && sentId && related !== sentId && related !== echoEntryId && related !== anchor?.entryId) return
+              turnFailed = {
+                code: str(tf['code'] ?? 'TURN_FAILED'),
+                summary: str(tf['summary'] ?? 'Grok Bot 执行该轮对话失败')
+              }
+              if (!streamsInBackground) broadcastGrokEvent({
+                type: 'turn_failed', accountId, agentId, sessionId: sessionId || undefined,
+                turnId: str(tf['turnId'] ?? tf['turn_id']) || undefined, ...turnFailed
+              })
+              endStream = true
+              return
             }
-            if (!streamsInBackground) broadcastGrokEvent({
-              type: 'turn_failed', accountId, agentId, sessionId: sessionId || undefined,
-              turnId: str(tf['turnId'] ?? tf['turn_id']) || undefined, ...turnFailed
-            })
-            break
-          }
-          const state = asObj(frame['agent_state'] ?? frame['agentState'])
-          if (state && matchesScope(state)) {
-            isAgentRunning = Boolean(state['isRunning'] ?? state['is_running']) ||
-              Boolean(state['isComposingMessage'] ?? state['is_composing_message'])
-            if (isAgentRunning) clearTimeout(settleTimer)
-            else if ([...bubbles.values()].some(({ entry }) => !entry.isStreaming)) armSettle(1_800)
-          }
-          const cleared = asObj(frame['cleared'])
-          if (cleared && matchesScope(cleared)) {
-            const next = Number(cleared['newGeneration'] ?? cleared['new_generation'])
-            if (Number.isSafeInteger(next) && next > generation) resetGeneration(next)
-          }
-          const expired = asObj(frame['cursor_too_old'] ?? frame['cursorTooOld'])
-          if (expired && matchesScope(expired)) {
-            gapFloor = cursor
-            if (lastBackfilled !== cursor) {
-              lastBackfilled = cursor
-              cursor = 0n
-              reconnect = true
+            const state = asObj(frame['agent_state'] ?? frame['agentState'])
+            if (state && matchesScope(state)) {
+              isAgentRunning = Boolean(state['isRunning'] ?? state['is_running']) ||
+                Boolean(state['isComposingMessage'] ?? state['is_composing_message'])
+              if (isAgentRunning) {
+                if (roomProgressUntil === undefined) clearTimeout(settleTimer)
+              } else if ([...bubbles.values()].some(({ entry }) => !entry.isStreaming)) {
+                armSettle(1_800)
+              }
             }
-            break
-          }
-          const rows = grokRows(frame)
-          if (!rows || !matchesScope(rows)) continue
-          const frameGeneration = Number(rows['generation'] ?? generation)
-          if (!Number.isSafeInteger(frameGeneration) || frameGeneration < generation) continue
-          if (frameGeneration > generation) {
-            if (generation !== 0) resetGeneration(frameGeneration)
-            else generation = frameGeneration
-          }
-          await acceptEntries(transcriptEntries(rows, agentId, sessionId))
+            const cleared = asObj(frame['cleared'])
+            if (cleared && matchesScope(cleared)) {
+              const next = Number(cleared['newGeneration'] ?? cleared['new_generation'])
+              if (Number.isSafeInteger(next) && next > generation) resetGeneration(next)
+            }
+            const expired = asObj(frame['cursor_too_old'] ?? frame['cursorTooOld'])
+            if (expired && matchesScope(expired)) {
+              gapFloor = cursor
+              if (lastBackfilled !== cursor) {
+                lastBackfilled = cursor
+                cursor = 0n
+                reconnect = true
+              }
+              endStream = true
+              return
+            }
+            const rows = grokRows(frame)
+            if (!rows || !matchesScope(rows)) return
+            const frameGeneration = Number(rows['generation'] ?? generation)
+            if (!Number.isSafeInteger(frameGeneration) || frameGeneration < generation) return
+            if (frameGeneration > generation) {
+              if (generation !== 0) resetGeneration(frameGeneration)
+              else generation = frameGeneration
+            }
+            if (await acceptEntries(transcriptEntries(rows, agentId, sessionId))) scheduleHistoryRead()
+          })
+          if (endStream) break
         }
       } catch (error) {
         if (signal.aborted) break
@@ -348,6 +447,8 @@ export async function watchUntilReply(
     ac.abort()
     clearTimeout(timer)
     clearTimeout(settleTimer)
+    clearTimeout(historyTimer)
+    await historyTask
   }
 }
 

@@ -57,7 +57,7 @@ export function buildRoomJson(room: CollabRoom, exportedAt = new Date()): string
   const { id, title, mode, brief, createdAt, finalId, members } = room
   return exportJson({
     room: { id, title, mode, brief, createdAt, finalId, members: members.map(({ botId, name, platform }) => ({ botId, name, platform })) }
-  }, room.messages, exportedAt)
+  }, room.messages.map(({ mediaSource: _source, ...message }) => message), exportedAt)
 }
 
 export function sanitizeExportFilename(name: string, ext: string): string {

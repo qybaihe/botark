@@ -27,6 +27,16 @@ describe('extractReplyText', () => {
     expect(extractReplyText(page({ id: 'a1', role: 'assistant', text: 'old answer' }), 'u2')).toBe('')
   })
 
+  it('does not attach an unlabelled reply after a later user prompt to an earlier turn', () => {
+    const p = page(
+      { id: 'u1', role: 'user', text: 'room prompt' },
+      { id: 'u2', role: 'user', text: 'direct prompt' },
+      { id: 'a2', role: 'assistant', text: 'direct reply' }
+    )
+    expect(extractReplyText(p, 'u1')).toBe('')
+    expect(extractReplyText(p, 'u2')).toBe('direct reply')
+  })
+
   it('without an anchor returns the newest assistant text', () => {
     expect(extractReplyText(page({ id: 'a1', role: 'assistant', text: 'hi' }))).toBe('hi')
   })

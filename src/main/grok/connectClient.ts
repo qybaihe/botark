@@ -791,10 +791,14 @@ export class GrokConnectClient {
       include_unlisted_agents: req.includeUnlistedAgents ?? true,
       inline_body_max_bytes: req.inlineBodyMaxBytes ?? 262_144
     }
+    const payload = new TextEncoder().encode(JSON.stringify(body))
+    const envelope = new Uint8Array(5 + payload.length)
+    new DataView(envelope.buffer).setUint32(1, payload.length)
+    envelope.set(payload, 5)
     const res = await this.fetchImpl(url, {
       method: 'POST',
       headers,
-      body: JSON.stringify(body),
+      body: envelope,
       signal
     })
     if (!res.ok) {

@@ -10,9 +10,12 @@ vi.mock('electron', async () => {
 import { adapterRegistry } from '@adapters/registry'
 import { AntigravityAdapter } from '@adapters/antigravity/AntigravityAdapter'
 import { GrokBotAdapter } from '@adapters/grokbot/GrokBotAdapter'
+import type { GrokRequest } from '@adapters/grokbot/grokRequests'
 import { DotAdapter } from '@adapters/dot/DotAdapter'
 import { setGrokAuth } from '@adapters/grokbot/tokenStore'
 import { runDotRpc } from '@main/dot/dotIpc'
+import { GrokConnectClient } from '@main/grok/connectClient'
+import { watchUntilReply } from '@main/grok/grokRpc'
 import { importDotCredentialsFromRaw, getStoredDotAccount } from '@main/dot/dotClient'
 import { partitionForAccount } from '@main/webContentsViewManager'
 import { mentions, roomMarkdown, type CollabRoom } from '@/rooms/model'
@@ -213,6 +216,102 @@ describe('Area 3: Group Creation, Conversation & Single-Bot Remove/Move', () => 
     )
     expect(listCallCount).toBeGreaterThanOrEqual(2)
     expect(received[0]!.text).toContain('Hydrated Grok Room Reply')
+  })
+
+  it.each(['text', 'file', 'link', 'delayed link'])('posts a Grok %s reply when only transcript history contains it', async (type) => {
+    const accountId = 'grok-room-recovery'
+    const botId = 'grok-room-bot'
+    const controller = new AbortController()
+    const sent: string[] = []
+    let sentAt = 0
+    const file = { path: 'grokatt://fixture/report.pdf', name: 'report.pdf', mimeType: 'application/pdf' }
+    const fileLink = '[报告](grokatt://fixture/attachment-id)'
+    const progress = '我来整理资料。'
+    const client = new GrokConnectClient({
+      auth: { accessToken: 'fixture' },
+      fetchImpl: async (input) => {
+        const url = String(input)
+        if (url.endsWith('/WatchGrokBotTranscripts')) {
+          return new Response(new ReadableStream<Uint8Array>())
+        }
+        if (url.endsWith('/ListGrokBotTranscriptEntries')) {
+          const echo = { entry_id: 'echo', client_nonce: sent[0], seq: '10', kind: 'message', content: 'Room prompt' }
+          if (type === 'delayed link') {
+            return Response.json({ entries: [
+              echo,
+              { entry_id: 'progress', seq: '11', kind: 'send-message', content: progress },
+              ...(Date.now() - sentAt >= 29_000
+                ? [{ entry_id: 'answer', seq: '12', kind: 'send-message', content: '[FINAL]\n' + fileLink }]
+                : [])
+            ] })
+          }
+          return Response.json({ entries: [
+            echo,
+            {
+              entry_id: 'answer', seq: '11', kind: 'send-message',
+              content: type === 'text' ? 'Recovered room answer' : type === 'link' ? fileLink : '',
+              ...(type === 'file' ? { attachments: [file] } : {})
+            }
+          ] })
+        }
+        throw new Error(`Unexpected mock request: ${url}`)
+      }
+    })
+    vi.stubGlobal('window', { electron: { grok: {
+      onEvent: () => () => {},
+      rpc: async (req: GrokRequest) => {
+        if (req.op === 'listAgents') return { ok: true, data: { agents: [{ id: 'agent' }] } }
+        if (req.op === 'sendUserMessage') {
+          sent.push(req.messageId)
+          sentAt = Date.now()
+        }
+        if (req.op === 'watchUntilReply') return { ok: true, data: await watchUntilReply(client, {
+          ...req, sessionId: req.sessionId ?? '', signal: controller.signal
+        }) }
+        return { ok: true, data: {} }
+      }
+    } } })
+    setGrokAuth({ accountId, signedIn: true })
+    const grok = new GrokBotAdapter()
+    await grok.connect(accountId)
+    vi.spyOn(adapterRegistry, 'get').mockReturnValue(grok)
+    useBotStore.setState({
+      bots: [
+        { id: botId, name: 'Grok', platformId: 'grok', selectedAgentId: type === 'text' ? 'agent' : undefined, accountIds: [accountId], activeAccountId: accountId } as Bot,
+        { id: 'observer', name: 'Observer', platformId: 'dot', accountIds: ['observer-account'], activeAccountId: 'observer-account' } as Bot
+      ],
+      accounts: {
+        [accountId]: { id: accountId, platformId: 'grok', displayName: 'Grok', handle: 'fixture', status: 'online' },
+        'observer-account': { id: 'observer-account', platformId: 'dot', displayName: 'Observer', handle: 'fixture', status: 'online' }
+      }
+    })
+    const room = addRoom('协作室回传测试', [botId, 'observer'], 'manual', 4)
+    useRooms.setState((state) => ({ rooms: state.rooms.map((item) => item.id === room.id
+      ? { ...item, members: item.members.map((member) => member.botId === botId
+          ? { ...member, sessionId: 'fixture-room-session' }
+          : member) }
+      : item) }))
+    vi.useFakeTimers()
+    const turn = submitBrief(room.id, '@Grok answer in this room')
+    try {
+      await vi.advanceTimersByTimeAsync(type === 'delayed link' ? 37_000 : 8_000)
+      const messages = useRooms.getState().rooms.find((item) => item.id === room.id)?.messages
+      const mediaSource = { accountId, platform: 'grok', agentId: 'agent', sessionId: 'fixture-room-session' }
+      expect(messages?.filter((item) => item.authorBotId === botId)).toEqual([
+        expect.objectContaining(type === 'file' ? {
+          text: '',
+          media: [{ ...file, kind: 'file' }],
+          mediaSource
+        } : type === 'link' ? { text: fileLink, mediaSource }
+          : type === 'delayed link' ? { text: ['[FINAL]', progress, fileLink].join('\n\n'), final: true, mediaSource }
+            : { text: 'Recovered room answer' })
+      ])
+      expect(sent).toHaveLength(1)
+    } finally {
+      controller.abort()
+      await turn
+      vi.useRealTimers()
+    }
   })
 
   it('E2E-T1-A3-04: Dot Room botId Non-Overwrite & native Thread Continuity', async (ctx) => {

@@ -97,6 +97,7 @@ export interface SendReceipt {
 
 export interface IncomingMessage {
   sessionId?: string
+  agentId?: string
   id: string
   conversationId: string
   accountId: string
